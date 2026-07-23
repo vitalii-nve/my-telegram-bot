@@ -10,6 +10,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
 API_TOKEN = '8615464194:AAGv1HnYIwoMJfsb7jPDGsEdj1zsK7A_udQ'  # <--- PASTE YOUR REAL TOKEN HERE
+LOG_CHANNEL_ID = -1004359034302  # <--- PASTE YOUR NEW CHANNEL ID HERE
 bot = telebot.TeleBot(API_TOKEN)
 STRIKE_LIMIT = 3
 DB_NAME = "spam_bot.db"
@@ -199,11 +200,25 @@ def filter_spam_and_strike(message):
     if is_spam:
         try:
             bot.delete_message(chat_id, message.message_id)
+            
+            # --- NEW: Send a report to your private log channel ---
+            bot.send_message(
+                LOG_CHANNEL_ID, 
+                f"🗑 **SPAM DELETED**\n"
+                f"User: {message.from_user.first_name} (ID: `{user_id}`)\n"
+                f"Message: {text}",
+                parse_mode="Markdown"
+            )
+            
             current_strikes = add_strike(user_id)
             
             if current_strikes >= STRIKE_LIMIT:
                 bot.kick_chat_member(chat_id, user_id)
                 bot.send_message(chat_id, f"🔨 User banned for reaching {STRIKE_LIMIT} spam strikes.")
+                
+                # --- NEW: Log the ban ---
+                bot.send_message(LOG_CHANNEL_ID, f"🔨 **USER BANNED**: {message.from_user.first_name} (3 Strikes)")
+                
                 reset_strikes(user_id)
             else:
                 warning = bot.send_message(chat_id, f"⚠️ Warning {current_strikes}/{STRIKE_LIMIT}: No links or spam allowed.")
