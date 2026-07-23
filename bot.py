@@ -40,7 +40,7 @@ def init_db():
     default_words = [
         # English Spam Words
         "crypto", "free money", "invest", "bitcoin", "earn cash", "join channel",
-        "giveaway", "airdrop", "forex", "binance", "casino", "jackpot", "bonus", "dm me", "usdt",
+        "giveaway", "airdrop", "forex", "binance", "casino", "jackpot", "bonus", "dm me", "usdt", "ustd",
         
         # Ukrainian Spam Words
         "крипта", "безкоштовні гроші", "інвестиції", "біткоїн", "заробіток", 
