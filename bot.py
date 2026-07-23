@@ -204,7 +204,7 @@ def filter_spam_and_strike(message):
     
     # Check against the dynamic database keywords
     current_keywords = get_spam_keywords()
-    is_spam = any(keyword in clean_text for keyword in current_keywords) or "http" in clean_text or "t.me/" in clean_text
+    is_spam = any(keyword in clean_text for keyword in current_keywords)
 
     if is_spam:
         try:
