@@ -36,8 +36,17 @@ def init_db():
         cursor.execute('''CREATE TABLE IF NOT EXISTS spam_keywords (word TEXT PRIMARY KEY)''')
         conn.commit()
         
-    # Seed default words if the database is brand new
-    default_words = ["crypto", "free money", "invest", "bitcoin", "earn cash", "join channel"]
+    # Seed default words (English & Ukrainian)
+    default_words = [
+        # English Spam Words
+        "crypto", "free money", "invest", "bitcoin", "earn cash", "join channel",
+        "giveaway", "airdrop", "forex", "binance", "casino", "jackpot", "bonus", "dm me",
+        
+        # Ukrainian Spam Words
+        "крипта", "безкоштовні гроші", "інвестиції", "біткоїн", "заробіток", 
+        "приєднуйся", "розіграш", "казино", "бонус", "безкоштовно", "ставки", 
+        "заробити", "виплата", "телеграм канал", "криптовалюта", "пиши в пп"
+    ]
     for word in default_words:
         add_spam_keyword(word)
 
