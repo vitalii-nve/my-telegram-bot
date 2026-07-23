@@ -175,6 +175,16 @@ def filter_spam_and_strike(message):
     if is_admin(chat_id, user_id):
         return
 
+    # --- NEW TRAP: Check CAS blacklist every time someone speaks ---
+    if check_cas_banned(user_id):
+        try:
+            bot.delete_message(chat_id, message.message_id)
+            bot.kick_chat_member(chat_id, user_id)
+            bot.send_message(chat_id, f"🚨 Banned an existing member ({message.from_user.first_name}) who is on the global CAS blacklist.")
+            return # Stop processing and exit
+        except Exception:
+            pass
+            
     # Normalize incoming text to catch evasive spelling
     clean_text = normalize_text(text)
     
