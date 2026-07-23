@@ -9,7 +9,7 @@ from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
-API_TOKEN = 'YOUR_BOT_TOKEN_HERE'  # <--- PASTE YOUR REAL TOKEN HERE
+API_TOKEN = '8615464194:AAGv1HnYIwoMJfsb7jPDGsEdj1zsK7A_udQ'  # <--- PASTE YOUR REAL TOKEN HERE
 bot = telebot.TeleBot(API_TOKEN)
 STRIKE_LIMIT = 3
 DB_NAME = "spam_bot.db"
