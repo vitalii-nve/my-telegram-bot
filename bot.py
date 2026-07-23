@@ -137,9 +137,9 @@ def handle_list_spam(message):
     else:
         bot.reply_to(message, "No spam keywords set.")
 
-@bot.message_handler(commands=['getid'])
+@bot.channel_post_handler(commands=['getid'])
 def handle_get_id(message):
-    bot.reply_to(message, f"The ID of this chat is: `{message.chat.id}`", parse_mode="Markdown")
+    bot.reply_to(message, f"The ID of this channel is: `{message.chat.id}`", parse_mode="Markdown")
     
 # --- Core Bot Features ---
 @bot.message_handler(content_types=['new_chat_members'])
