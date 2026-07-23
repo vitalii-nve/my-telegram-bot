@@ -8,7 +8,7 @@ from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
-API_TOKEN = 'YOUR_BOT_TOKEN_HERE'  # <--- PASTE YOUR TOKEN HERE
+API_TOKEN = '8615464194:AAGv1HnYIwoMJfsb7jPDGsEdj1zsK7A_udQ'  # <--- PASTE YOUR TOKEN HERE
 bot = telebot.TeleBot(API_TOKEN)
 SPAM_KEYWORDS = ["crypto", "free money", "invest", "bitcoin", "earn cash", "join channel"]
 STRIKE_LIMIT = 3
