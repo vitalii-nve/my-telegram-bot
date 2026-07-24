@@ -17,7 +17,7 @@ LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))  # your private log 
 DB_NAME = os.environ.get("DB_PATH", "spam_bot.db")           # point at a persistent disk on Render!
 
 STRIKE_LIMIT = 3
-CAPTCHA_TIMEOUT = 60        # seconds a new joiner has to press the button (5 min)
+CAPTCHA_TIMEOUT = 300        # seconds a new joiner has to press the button (5 min)
 MEDIA_LOCK_SECONDS = 86400   # text-only period after verification (24 h)
 ADMIN_CACHE_TTL = 300        # re-fetch admin list every 5 min
 CAS_CACHE_TTL = 3600         # re-check CAS per user at most once per hour
@@ -320,45 +320,71 @@ def captcha_timeout(chat_id, user_id, first_name):
     soft_kick(chat_id, user_id)
     log_event(f"⏱ Captcha timeout — removed {html.escape(first_name or '?')} (id <code>{user_id}</code>). They can rejoin.")
 
+_recent_joins = {}  # (chat_id, user_id) -> timestamp, dedupes double join events
+
+def process_new_member(chat_id, user):
+    if user.is_bot:
+        return
+
+    # The same join can arrive both as a service message AND as a
+    # chat_member update — handle it only once.
+    now = time.time()
+    key = (chat_id, user.id)
+    if now - _recent_joins.get(key, 0) < 60:
+        return
+    _recent_joins[key] = now
+
+    # Telegram refuses to restrict admins/the owner — skip the captcha for them.
+    if is_admin(chat_id, user.id):
+        log_event(f"👤 Admin {user_label(user)} joined — captcha skipped (admins can't be restricted).")
+        return
+
+    # Step 1: global CAS blacklist
+    if check_cas_banned(user.id):
+        hard_ban(chat_id, user.id)
+        log_event(f"🚨 Pre-emptively banned {user_label(user)} on join (CAS blacklist).")
+        return
+
+    # Step 2: mute until verified
+    try:
+        bot.restrict_chat_member(chat_id, user.id,
+                                 permissions=ChatPermissions(can_send_messages=False))
+    except Exception as e:
+        log_event(f"⚠️ Could not restrict {user_label(user)}: {html.escape(str(e))} — captcha skipped.")
+        return
+
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("I am human 🤖🚫", callback_data=f"captcha_{user.id}"))
+    sent = bot.send_message(
+        chat_id,
+        f"Welcome {user.first_name}! Press the button within "
+        f"{CAPTCHA_TIMEOUT // 60} minutes to unlock the chat.",
+        reply_markup=markup
+    )
+
+    # Step 3: arm the timeout
+    timer = threading.Timer(CAPTCHA_TIMEOUT, captcha_timeout,
+                            args=(chat_id, user.id, user.first_name))
+    timer.daemon = True
+    timer.start()
+    with _pending_lock:
+        _pending_captcha[(chat_id, user.id)] = {"msg_id": sent.message_id, "timer": timer}
+
+    log_event(f"👤 New joiner {user_label(user)} — captcha sent.")
+
 @bot.message_handler(content_types=['new_chat_members'])
 def handle_new_member(message):
-    chat_id = message.chat.id
     for new_user in message.new_chat_members:
-        if new_user.is_bot:
-            continue
+        process_new_member(message.chat.id, new_user)
 
-        # Step 1: global CAS blacklist
-        if check_cas_banned(new_user.id):
-            hard_ban(chat_id, new_user.id)
-            log_event(f"🚨 Pre-emptively banned {user_label(new_user)} on join (CAS blacklist).")
-            continue
-
-        # Step 2: mute until verified
-        try:
-            bot.restrict_chat_member(chat_id, new_user.id,
-                                     permissions=ChatPermissions(can_send_messages=False))
-        except Exception as e:
-            print(f"Restrict error: {e}")
-            continue
-
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("I am human 🤖🚫", callback_data=f"captcha_{new_user.id}"))
-        sent = bot.send_message(
-            chat_id,
-            f"Welcome {new_user.first_name}! Press the button within "
-            f"{CAPTCHA_TIMEOUT // 60} minutes to unlock the chat.",
-            reply_markup=markup
-        )
-
-        # Step 3: arm the timeout
-        timer = threading.Timer(CAPTCHA_TIMEOUT, captcha_timeout,
-                                args=(chat_id, new_user.id, new_user.first_name))
-        timer.daemon = True
-        timer.start()
-        with _pending_lock:
-            _pending_captcha[(chat_id, new_user.id)] = {"msg_id": sent.message_id, "timer": timer}
-
-        log_event(f"👤 New joiner {user_label(new_user)} — captcha sent.")
+@bot.chat_member_handler()
+def handle_chat_member_update(update):
+    """Catches joins that produce NO service message — invite links with
+    hidden join notifications, approved join requests, large groups."""
+    old = update.old_chat_member.status
+    new = update.new_chat_member.status
+    if new == 'member' and old in ('left', 'kicked'):
+        process_new_member(update.chat.id, update.new_chat_member.user)
 
 @bot.message_handler(content_types=['left_chat_member'])
 def handle_left_member(message):
@@ -465,5 +491,8 @@ def filter_edited_spam(message):
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=run_web, daemon=True).start()
-    print(f"V5 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, silent mode ON.")
-    bot.infinity_polling()
+    print(f"V5.1 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, silent mode ON.")
+    # chat_member updates are NOT delivered unless explicitly requested:
+    bot.infinity_polling(allowed_updates=[
+        'message', 'edited_message', 'channel_post', 'callback_query', 'chat_member'
+    ])
