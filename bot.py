@@ -17,7 +17,7 @@ LOG_CHANNEL_ID = int(os.environ.get("-1004359034302", "0"))  # your private log 
 DB_NAME = os.environ.get("DB_PATH", "spam_bot.db")           # point at a persistent disk on Render!
 
 STRIKE_LIMIT = 3
-CAPTCHA_TIMEOUT = 300        # seconds a new joiner has to press the button (5 min)
+CAPTCHA_TIMEOUT = 60        # seconds a new joiner has to press the button (5 min)
 MEDIA_LOCK_SECONDS = 86400   # text-only period after verification (24 h)
 ADMIN_CACHE_TTL = 300        # re-fetch admin list every 5 min
 CAS_CACHE_TTL = 3600         # re-check CAS per user at most once per hour
