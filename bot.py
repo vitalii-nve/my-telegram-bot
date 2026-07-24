@@ -325,7 +325,7 @@ DEFAULT_KEYWORDS = {
         "usdt", "ustd", "trc20", "erc20",
         "free money", "easy money", "quick cash", "fast cash",
         "get rich", "financial freedom", "passive income",
-        "telegram premium free", "free premium",
+        "telegram premium free", "free premium", "tether",
         # Ukrainian
         "казино", "ставки на спорт", "букмекер", "бонус за реєстрацію",
         "ескорт", "інтим", "вебкам",
