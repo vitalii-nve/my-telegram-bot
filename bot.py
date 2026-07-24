@@ -13,7 +13,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermis
 # Configuration — set these in Render -> Environment
 # =========================================================
 API_TOKEN = os.environ["API_TOKEN"]                          # REQUIRED. Never hardcode it again.
-LOG_CHANNEL_ID = int(os.environ.get("-1004359034302", "0"))  # your private log channel id
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))  # your private log channel id
 DB_NAME = os.environ.get("DB_PATH", "spam_bot.db")           # point at a persistent disk on Render!
 
 STRIKE_LIMIT = 3
