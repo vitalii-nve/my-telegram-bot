@@ -331,7 +331,7 @@ DEFAULT_KEYWORDS = {
         "airdrop", "trading signals", "crypto signals", "pump and dump",
         "binary options", "guaranteed profit", "guaranteed income",
         "double your money", "cloud mining", "mining pool",
-        "usdt", "ustd", "trc20", "erc20",
+        "usdt", "ustd", "trc20", "erc20", "tether",
         "free money", "easy money", "quick cash", "fast cash",
         "get rich", "financial freedom", "passive income",
         "telegram premium free", "free premium",
