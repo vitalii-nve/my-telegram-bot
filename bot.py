@@ -64,9 +64,15 @@ def text_variants(text):
 
 # Patterns checked on RAW (lowercased) text, before punctuation stripping
 CONTACT_RX = re.compile(r'@[a-zA-Z][a-zA-Z0-9_]{3,}|t\.me/|telegram\.me/', re.I)
+CURRENCY = r'(?:usdt?|euro?|dkk|kroner|kr|евро|євро|крон\w*|грн|грив\w*|долл\w*|долар\w*)'
 MONEY_RX = re.compile(
     r'[\$€£₴]\s*\d|\d\s*[\$€£₴]|'
-    r'\d\s*(?:usd|usdt|eur|dkk|kr|kroner|крон|грн|гривень|долл|доллар)\b', re.I)
+    r'\d\s*' + CURRENCY + r'\b', re.I)
+# "700 евро в неделю" — pay-rate promises in EUR/USD are a scam signature
+# here (legitimate salaries and rents in Denmark are quoted in kroner)
+PAYRATE_RX = re.compile(
+    r'\d[\d\s.,]*\s*(?:[\$€]|usdt?|euro?|евро|євро|долл\w*|долар\w*)\s*(?:в|на|per|/)\s*'
+    r'(?:день|неделю|месяц|тиждень|місяць|day|week|month)', re.I)
 
 # =========================================================
 # Database
@@ -207,8 +213,9 @@ def score_message(raw_text):
 
     raw = raw_text.lower()
     money_contact = bool(MONEY_RX.search(raw) and CONTACT_RX.search(raw))
+    payrate = bool(PAYRATE_RX.search(raw))
 
-    score = 2 * len(strong) + len(weak) + (1 if money_contact else 0)
+    score = 2 * len(strong) + len(weak) + (1 if money_contact else 0) + (1 if payrate else 0)
     parts = []
     if strong:
         parts.append("strong: " + ", ".join(sorted(strong)))
@@ -216,6 +223,8 @@ def score_message(raw_text):
         parts.append("weak: " + ", ".join(sorted(weak)))
     if money_contact:
         parts.append("pattern: money+contact")
+    if payrate:
+        parts.append("pattern: pay-rate promise")
     return score, " | ".join(parts)
 
 # =========================================================
@@ -325,7 +334,7 @@ DEFAULT_KEYWORDS = {
         "usdt", "ustd", "trc20", "erc20",
         "free money", "easy money", "quick cash", "fast cash",
         "get rich", "financial freedom", "passive income",
-        "telegram premium free", "free premium", "tether",
+        "telegram premium free", "free premium",
         # Ukrainian
         "казино", "ставки на спорт", "букмекер", "бонус за реєстрацію",
         "ескорт", "інтим", "вебкам",
@@ -339,6 +348,8 @@ DEFAULT_KEYWORDS = {
         "легкие деньги", "быстрые деньги", "заработок в интернете",
         "пассивный доход", "пришлю информацию", "пришлю вам интересующую",
         "сигареты", "набор в команду",
+        "раскрыть свой потенциал", "справляться с любыми задачами",
+        "розкрити свій потенціал",
     ],
     'weak': [
         # English
@@ -593,8 +604,30 @@ def handle_captcha(call):
 
 # =========================================================
 # Moderation — fully silent in the group.
-# Order: CAS -> channel forwards -> newcomer probation -> keyword scoring
+# Order: CAS -> channel forwards -> probation -> flood -> keyword scoring
 # =========================================================
+DUP_WINDOW = 900     # same text repeated within 15 min = flood
+DUP_MIN_LEN = 80     # only long messages count (so "дякую" repeats are safe)
+_dup_lock = threading.Lock()
+_recent_texts = {}   # hash(normalized text) -> [first_seen_ts, count]
+
+def is_duplicate_flood(norm_text):
+    """True from the SECOND identical long message within the window,
+    regardless of which account posts it (spam campaigns rotate accounts)."""
+    if len(norm_text) < DUP_MIN_LEN:
+        return False
+    h = hash(norm_text)
+    now = time.time()
+    with _dup_lock:
+        for k in [k for k, (ts, _) in _recent_texts.items() if now - ts > DUP_WINDOW]:
+            del _recent_texts[k]
+        entry = _recent_texts.get(h)
+        if entry:
+            entry[1] += 1
+            return True
+        _recent_texts[h] = [now, 1]
+    return False
+
 def punish(message, reason):
     chat_id = message.chat.id
     user = message.from_user
@@ -648,7 +681,12 @@ def moderate(message):
         )
         return
 
-    # 4. Tiered keyword scoring with homoglyph variants
+    # 4. Identical long message repeated within 15 min = flood campaign
+    if is_duplicate_flood(normalize_text(text)):
+        punish(message, "duplicate flood (same text repeated)")
+        return
+
+    # 5. Tiered keyword scoring with homoglyph variants
     score, reason = score_message(text)
     if score >= SPAM_SCORE_THRESHOLD:
         punish(message, f"score {score} ({reason})")
