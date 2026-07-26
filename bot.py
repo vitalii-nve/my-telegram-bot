@@ -18,7 +18,7 @@ DB_NAME = os.environ.get("DB_PATH", "spam_bot.db")           # point at a persis
 
 STRIKE_LIMIT = 3
 STRIKE_TTL = 30 * 86400      # strikes older than 30 days no longer count
-CAPTCHA_TIMEOUT = 300        # seconds a new joiner has to press the button
+CAPTCHA_TIMEOUT = 120        # seconds a new joiner has to press the button
 MEDIA_LOCK_SECONDS = 86400   # text-only period after verification (24 h)
 PROBATION_SECONDS = 86400    # after verification: no t.me links / @handles for 24 h
 SPAM_SCORE_THRESHOLD = 2     # strong keyword = 2 points, weak = 1 point each
