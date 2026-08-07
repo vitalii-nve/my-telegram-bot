@@ -17,11 +17,16 @@ LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))  # private log chann
 DB_NAME = os.environ.get("DB_PATH", "spam_bot.db")           # point at a persistent disk on Render!
 
 STRIKE_LIMIT = 3
-STRIKE_TTL = 30 * 86400      # strikes older than 30 days no longer count
-CAPTCHA_TIMEOUT = 120        # seconds a new joiner has to press the button
-MEDIA_LOCK_SECONDS = 86400   # text-only period after verification (24 h)
-PROBATION_SECONDS = 86400    # after verification: no t.me links / @handles for 24 h
-SPAM_SCORE_THRESHOLD = 2     # strong keyword = 2 points, weak = 1 point each
+STRIKE_TTL = 30 * 86400        # strikes older than 30 days no longer count
+SPAM_SCORE_THRESHOLD = 2       # delete + strike at this score
+BAN_SCORE_THRESHOLD = 5        # delete + INSTANT PERMANENT BAN at this score
+CAPTCHA_TIMEOUT = 120
+MEDIA_LOCK_SECONDS = 86400
+PROBATION_SECONDS = 86400
+TRUSTED_MIN_MESSAGES = 30      # members with this many clean messages skip flood/probation
+TOXIC_LIMIT = 3                # profanity warnings before a temporary mute
+TOXIC_MUTE_SECONDS = 7 * 86400 # "ban for a week" = 7-day mute
+TOXIC_TTL = 30 * 86400         # profanity counter decays after 30 days
 ADMIN_CACHE_TTL = 300
 CAS_CACHE_TTL = 3600
 
@@ -44,35 +49,48 @@ def run_web():
 # Text normalization + homoglyph handling
 # =========================================================
 ZERO_WIDTH = dict.fromkeys(map(ord, '\u200b\u200c\u200d\u2060\ufeff'), None)
-
-# Visually identical/near-identical letters used to evade filters
-# (seen in the wild in this group: "оtkrut набор в команду")
 LAT_TO_CYR = str.maketrans('aceiopxyk03', 'асеіорхукоз')
 CYR_TO_LAT = str.maketrans('асеіорхук0', 'aceiopxyko')
 
 def normalize_text(text):
-    """Lowercase, strip evasion characters, unify ё->е, collapse spaces."""
+    """Lowercase, strip evasion characters, unify ё->е, collapse spaces.
+    Dashes become spaces so 'онлайн-співпраця' stays two words."""
     t = text.lower().translate(ZERO_WIDTH)
     t = t.replace('ё', 'е')
-    t = re.sub(r"[.\_\-\*\@\#\$\%\^\&\(\)\+\=\~\'\"\!\?\,\:\;]", '', t)
+    t = re.sub(r'[\-\—\–]', ' ', t)
+    t = re.sub(r"[.\_\*\@\#\$\%\^\&\(\)\+\=\~\'\"\!\?\,\:\;]", '', t)
     return ' '.join(t.split())
 
+def normalize_keyword(word):
+    """Like normalize_text, but preserves a trailing * (suffix wildcard)."""
+    star = word.strip().endswith('*')
+    n = normalize_text(word)
+    return n + '*' if star and n else n
+
 def text_variants(text):
-    """Base + all-Cyrillic + all-Latin homoglyph variants of the text."""
     base = normalize_text(text)
     return {base, base.translate(LAT_TO_CYR), base.translate(CYR_TO_LAT)}
 
-# Patterns checked on RAW (lowercased) text, before punctuation stripping
+# ---- Patterns checked on RAW (lowercased) text ----
 CONTACT_RX = re.compile(r'@[a-zA-Z][a-zA-Z0-9_]{3,}|t\.me/|telegram\.me/', re.I)
 CURRENCY = r'(?:usdt?|euro?|dkk|kroner|kr|евро|євро|крон\w*|грн|грив\w*|долл\w*|долар\w*)'
 MONEY_RX = re.compile(
     r'[\$€£₴]\s*\d|\d\s*[\$€£₴]|'
     r'\d\s*' + CURRENCY + r'\b', re.I)
-# "700 евро в неделю" — pay-rate promises in EUR/USD are a scam signature
-# here (legitimate salaries and rents in Denmark are quoted in kroner)
+# "700 евро в неделю" / "260 долларов США в день" — EUR/USD pay-rate promises
 PAYRATE_RX = re.compile(
-    r'\d[\d\s.,]*\s*(?:[\$€]|usdt?|euro?|евро|євро|долл\w*|долар\w*)\s*(?:в|на|per|/)\s*'
-    r'(?:день|неделю|месяц|тиждень|місяць|day|week|month)', re.I)
+    r'\d[\d\s.,]*\s*(?:[\$€]|usdt?|euro?|евро|євро|долл\w*|долар\w*)\s*(?:сша|usa)?\s*'
+    r'(?:в|на|per|/)\s*(?:день|сутки|неделю|месяц|тиждень|місяць|day|week|month)', re.I)
+# Selling tobacco = instant ban ("продам сигарети/сігарети/цигарки/вейпи...")
+SELL_RX = re.compile(r'(?<!\w)(?:продам|продаю|продаж\w*|є в наявності|в наличии)(?!\w)', re.I)
+TOBACCO_RX = re.compile(
+    r'сигарет\w*|сігарет\w*|сиграет\w*|сігрaет\w*|цигарк\w*|цыгарк\w*|'
+    r'тютюн\w*|табак\w*|айкос\w*|iqos|стіки|стики|вейп\w*|одноразк\w*|снюс\w*', re.I)
+# P2P crypto deals ("куплю юсдт", "продам usdt за нал") — +1 scoring point
+CRYPTO_TRADE_RX = re.compile(
+    r'(?<!\w)(?:куплю|купить|купити|продам|продаю|обмен\w*|обміня\w*|обмін|'
+    r'вывод\w*|виведу|обнал\w*)(?!\w).{0,80}?'
+    r'(?:usdt|юсдт|усдт|тезер|tether|крипт\w*|біткоїн\w*|биткоин\w*|btc)', re.I | re.S)
 
 # =========================================================
 # Database
@@ -90,8 +108,11 @@ def init_db():
         c.execute('CREATE TABLE IF NOT EXISTS verified_members '
                   '(user_id INTEGER PRIMARY KEY, verified_at REAL)')
         c.execute('CREATE TABLE IF NOT EXISTS allowed_channels (name TEXT PRIMARY KEY)')
+        c.execute('CREATE TABLE IF NOT EXISTS user_stats '
+                  '(user_id INTEGER PRIMARY KEY, msg_count INTEGER DEFAULT 0)')
+        c.execute('CREATE TABLE IF NOT EXISTS toxic_strikes '
+                  '(user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, last_at REAL DEFAULT 0)')
         conn.commit()
-        # Migrations for databases created by V5
         for stmt in ("ALTER TABLE user_strikes ADD COLUMN last_at REAL DEFAULT 0",
                      "ALTER TABLE spam_keywords ADD COLUMN tier TEXT DEFAULT 'strong'"):
             try:
@@ -106,27 +127,53 @@ def init_db():
         allow_channel(ch)
     rebuild_patterns()
 
-def add_strike(user_id):
+def _counter_bump(table, user_id, ttl):
+    """Shared logic for expiring counters (spam strikes, toxic warnings)."""
+    col = 'strikes' if table == 'user_strikes' else 'count'
     now = time.time()
     with db() as conn:
         c = conn.cursor()
-        c.execute("SELECT strikes, last_at FROM user_strikes WHERE user_id = ?", (user_id,))
+        c.execute(f"SELECT {col}, last_at FROM {table} WHERE user_id = ?", (user_id,))
         row = c.fetchone()
-        # Old strikes expire: a warning from months ago shouldn't cause a ban today
-        strikes = row[0] + 1 if row and now - (row[1] or 0) <= STRIKE_TTL else 1
-        c.execute("INSERT INTO user_strikes (user_id, strikes, last_at) VALUES (?, ?, ?) "
-                  "ON CONFLICT(user_id) DO UPDATE SET strikes = ?, last_at = ?",
-                  (user_id, strikes, now, strikes, now))
+        value = row[0] + 1 if row and now - (row[1] or 0) <= ttl else 1
+        c.execute(f"INSERT INTO {table} (user_id, {col}, last_at) VALUES (?, ?, ?) "
+                  f"ON CONFLICT(user_id) DO UPDATE SET {col} = ?, last_at = ?",
+                  (user_id, value, now, value, now))
         conn.commit()
-    return strikes
+    return value
+
+def add_strike(user_id):
+    return _counter_bump('user_strikes', user_id, STRIKE_TTL)
+
+def add_toxic(user_id):
+    return _counter_bump('toxic_strikes', user_id, TOXIC_TTL)
 
 def reset_strikes(user_id):
     with db() as conn:
         conn.execute("DELETE FROM user_strikes WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM toxic_strikes WHERE user_id = ?", (user_id,))
         conn.commit()
 
+def bump_msg_count(user_id):
+    with db() as conn:
+        conn.execute("INSERT INTO user_stats (user_id, msg_count) VALUES (?, 1) "
+                     "ON CONFLICT(user_id) DO UPDATE SET msg_count = msg_count + 1", (user_id,))
+        conn.commit()
+
+def set_msg_count(user_id, value):
+    with db() as conn:
+        conn.execute("INSERT INTO user_stats (user_id, msg_count) VALUES (?, ?) "
+                     "ON CONFLICT(user_id) DO UPDATE SET msg_count = ?", (user_id, value, value))
+        conn.commit()
+
+def is_trusted(user_id):
+    with db() as conn:
+        row = conn.execute("SELECT msg_count FROM user_stats WHERE user_id = ?",
+                           (user_id,)).fetchone()
+    return bool(row) and row[0] >= TRUSTED_MIN_MESSAGES
+
 def add_spam_keyword(word, tier='strong', rebuild=True):
-    word = normalize_text(word)
+    word = normalize_keyword(word)
     if not word:
         return
     with db() as conn:
@@ -137,7 +184,7 @@ def add_spam_keyword(word, tier='strong', rebuild=True):
         rebuild_patterns()
 
 def remove_spam_keyword(word, rebuild=True):
-    word = normalize_text(word)
+    word = normalize_keyword(word)
     with db() as conn:
         conn.execute("DELETE FROM spam_keywords WHERE word = ?", (word,))
         conn.commit()
@@ -145,7 +192,6 @@ def remove_spam_keyword(word, rebuild=True):
         rebuild_patterns()
 
 def get_spam_keywords():
-    """Returns list of (word, tier)."""
     with db() as conn:
         return list(conn.execute("SELECT word, tier FROM spam_keywords ORDER BY tier, word"))
 
@@ -180,58 +226,67 @@ def get_allowed_channels():
         return {row[0] for row in conn.execute("SELECT name FROM allowed_channels")}
 
 # =========================================================
-# Keyword matching with tiers + scoring
+# Keyword matching: tiers ban / strong / weak / toxic,
+# optional trailing * = suffix wildcard ("тезер*" matches "тезера")
 # =========================================================
 _patterns_lock = threading.Lock()
-_patterns = []  # list of (keyword, tier, compiled_regex)
+_patterns = []  # (keyword, tier, compiled_regex)
 
 def rebuild_patterns():
     global _patterns
     pats = []
     for kw, tier in get_spam_keywords():
-        pats.append((kw, tier, re.compile(r'(?<!\w)' + re.escape(kw) + r'(?!\w)')))
+        if kw.endswith('*'):
+            rx = re.compile(r'(?<!\w)' + re.escape(kw[:-1]) + r'\w*')
+        else:
+            rx = re.compile(r'(?<!\w)' + re.escape(kw) + r'(?!\w)')
+        pats.append((kw, tier, rx))
     with _patterns_lock:
         _patterns = pats
 
-def score_message(raw_text):
-    """Returns (score, reason) — strong keyword = 2 pts, weak = 1 pt,
-    money-amount + telegram-contact pattern = 1 pt."""
+def match_keywords(raw_text):
+    """Returns {tier: set(keywords)} matched across homoglyph variants."""
     variants = text_variants(raw_text)
     with _patterns_lock:
         pats = list(_patterns)
-
-    strong, weak = set(), set()
+    hits = {'ban': set(), 'strong': set(), 'weak': set(), 'toxic': set()}
     for kw, tier, rx in pats:
-        if any(rx.search(v) for v in variants):
-            (strong if tier == 'strong' else weak).add(kw)
-
+        if tier in hits and any(rx.search(v) for v in variants):
+            hits[tier].add(kw)
     # Don't double-count keywords contained in a longer matched phrase
-    # (e.g. "в лс" inside "пишите в лс")
-    matched = strong | weak
-    strong = {k for k in strong if not any(k != o and k in o for o in matched)}
-    weak = {k for k in weak if not any(k != o and k in o for o in matched)}
+    all_matched = set().union(*hits.values())
+    for tier in hits:
+        hits[tier] = {k for k in hits[tier]
+                      if not any(k != o and k.rstrip('*') in o for o in all_matched)}
+    return hits
 
+def score_message(raw_text, hits):
     raw = raw_text.lower()
     money_contact = bool(MONEY_RX.search(raw) and CONTACT_RX.search(raw))
     payrate = bool(PAYRATE_RX.search(raw))
+    crypto_trade = bool(CRYPTO_TRADE_RX.search(raw))
 
-    score = 2 * len(strong) + len(weak) + (1 if money_contact else 0) + (1 if payrate else 0)
+    score = (2 * len(hits['strong']) + len(hits['weak'])
+             + (1 if money_contact else 0) + (1 if payrate else 0)
+             + (1 if crypto_trade else 0))
     parts = []
-    if strong:
-        parts.append("strong: " + ", ".join(sorted(strong)))
-    if weak:
-        parts.append("weak: " + ", ".join(sorted(weak)))
+    if hits['strong']:
+        parts.append("strong: " + ", ".join(sorted(hits['strong'])))
+    if hits['weak']:
+        parts.append("weak: " + ", ".join(sorted(hits['weak'])))
     if money_contact:
         parts.append("pattern: money+contact")
     if payrate:
         parts.append("pattern: pay-rate promise")
+    if crypto_trade:
+        parts.append("pattern: crypto trade")
     return score, " | ".join(parts)
 
 # =========================================================
 # Caches
 # =========================================================
-_admin_cache = {}   # chat_id -> (fetched_at, set(user_ids))
-_cas_cache = {}     # user_id -> (checked_at, banned_bool)
+_admin_cache = {}
+_cas_cache = {}
 
 def is_admin(chat_id, user_id):
     now = time.time()
@@ -295,6 +350,14 @@ def hard_ban(chat_id, user_id):
     except Exception as e:
         print(f"Ban error: {e}")
 
+def mute_for(chat_id, user_id, seconds):
+    try:
+        bot.restrict_chat_member(chat_id, user_id,
+                                 until_date=int(time.time()) + seconds,
+                                 permissions=ChatPermissions(can_send_messages=False))
+    except Exception as e:
+        print(f"Mute error: {e}")
+
 def temp_reply(message, text, delay=5):
     try:
         sent = bot.reply_to(message, text, parse_mode="HTML")
@@ -303,12 +366,19 @@ def temp_reply(message, text, delay=5):
     except Exception:
         pass
 
+def temp_notice(chat_id, text, delay=10):
+    """Visible self-destructing notice (used only for toxicity warnings)."""
+    try:
+        sent = bot.send_message(chat_id, text, parse_mode="HTML")
+        threading.Timer(delay, delete_silently, args=(chat_id, sent.message_id)).start()
+    except Exception:
+        pass
+
 def command_arg(message):
     parts = (message.text or '').split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ''
 
 def forwarded_channel(message):
-    """Returns the source Chat if the message is forwarded from a channel."""
     ch = getattr(message, 'forward_from_chat', None)
     if ch is not None and getattr(ch, 'type', '') == 'channel':
         return ch
@@ -318,11 +388,13 @@ def forwarded_channel(message):
     return None
 
 # =========================================================
-# Default keyword library (EN / UK / RU)
-# strong  -> one hit is enough to delete
-# weak    -> needs 2 combined hits (or 1 hit + money/contact pattern)
+# Default keyword library
+#   ban    -> one hit = delete + PERMANENT BAN (admin-managed, starts empty)
+#   strong -> 2 points  |  weak -> 1 point  (threshold 2 = delete+strike,
+#   5+ = delete+ban)    |  toxic -> profanity counter (3 -> 7-day mute)
 # =========================================================
 DEFAULT_KEYWORDS = {
+    'ban': [],
     'strong': [
         # English
         "casino", "jackpot", "free spins", "1win",
@@ -341,15 +413,29 @@ DEFAULT_KEYWORDS = {
         "схема заробітку", "робоча схема", "безкоштовні гроші",
         "легкі гроші", "швидкі гроші", "заробіток в інтернеті",
         "пасивний дохід", "надішлю інформацію",
-        "сигарети", "цигарки", "набір у команду",
+        "набір у команду",
+        "розкрити свій потенціал",
+        "онлайн співпрац*", "робота з телефону", "навчання з нуля",
+        "заняття безкоштовно", "урок безкоштовно",
+        "пробне заняття", "пробний урок",
+        "чекаю на ваші повідомлення",
+        "дивіться в профілі", "дивись в профілі", "інфа в профілі",
+        "набираю дітей", "набір дітей", "шукаю дівчаток",
         # Russian
         "бонус за регистрацию", "эскорт", "интим",
         "схема заработка", "рабочая схема", "бесплатные деньги", "халява",
         "легкие деньги", "быстрые деньги", "заработок в интернете",
         "пассивный доход", "пришлю информацию", "пришлю вам интересующую",
-        "сигареты", "набор в команду",
+        "набор в команду",
         "раскрыть свой потенциал", "справляться с любыми задачами",
-        "розкрити свій потенціал",
+        "онлайн сотрудничеств*", "работа с телефона", "обучение с нуля",
+        "занятие бесплатно", "урок бесплатно",
+        "пробное занятие", "пробный урок",
+        "жду ваши сообщения", "жду ваших сообщений", "ожидаю вашего сообщения",
+        "смотрите в профиле", "смотри в профиле", "инфо в профиле", "инфа в профиле",
+        "юсдт", "усдт", "тезер*",
+        "ищем русскоязычных", "набираю ребят", "набираю детей", "набор детей",
+        "ищу девушек", "ищу девочек",
     ],
     'weak': [
         # English
@@ -361,70 +447,94 @@ DEFAULT_KEYWORDS = {
         "sign up bonus", "welcome bonus", "presale",
         # Ukrainian
         "крипта", "криптовалюта", "біткоїн", "інвестиції", "інвестувати",
-        "трейдинг", "сигнали", "заробіток", "заробити", "дохід",
+        "трейдинг", "сигнали", "заробіток", "заробити", "дохід", "доходу", "доходів",
         "зарплата від", "гарна зарплата", "без вкладень", "вкладення від",
         "щоденні виплати", "виплати щодня", "потрібні люди",
         "набираємо людей", "шукаємо людей", "потрібен персонал",
-        "віддалена робота", "робота вдома",
+        "віддалена робота", "робота вдома", "вільний графік",
         "пиши в пп", "в пп", "пиши в особисті", "пишіть в особисті",
         "в приватні повідомлення", "деталі в особистих",
+        "звертайтесь в особисті", "звертайтеся в особисті", "у приват", "в приват",
         "переходь за посиланням", "тисни на посилання",
         "телеграм канал", "приєднуйся", "бонус", "промокод",
         "розіграш", "ставки",
+        "виїзд", "виїзд за кордон", "білий квиток", "відстрочка", "сзч",
+        "оплата на картку", "продам євро", "куплю євро", "обмін валют",
+        "кількість місць обмежена", "дізнатися деталі",
         # Russian
         "биткоин", "инвестиции", "инвестировать", "трейдинг", "трейдер",
-        "сигналы", "заработок", "заработать", "доход",
+        "сигналы", "заработок", "заработать", "доход", "дохода",
+        "потенциал дохода",
         "зарплата от", "хорошая зарплата", "без вложений", "вложения от",
         "ежедневные выплаты", "выплаты каждый день", "первые выплаты",
         "нужны люди", "набираем людей", "ищем людей",
-        "требуются сотрудники", "нужен персонал",
-        "удаленная работа", "работа на дому",
+        "требуются сотрудники", "требуются люди", "нужен персонал",
+        "удаленная работа", "работа на дому", "удаленный формат",
+        "дистанционн*", "русскоязычн*", "свободный график", "гибкий график",
+        "совмещение с основной",
         "пиши в лс", "пишите в лс", "в лс", "пиши в личку", "пишите в личку",
         "в личные сообщения", "подробности в лс",
         "переходи по ссылке", "жми на ссылку", "приватный канал",
         "розыгрыш",
+        "выезд", "выезд за границу", "белый билет", "отсрочка",
+        "оплата на карту", "продам евро", "куплю евро", "обмен валют", "за нал",
+        "количество мест ограничено", "узнать детали",
+        "сигареты", "сигарети", "цигарки",
+    ],
+    'toxic': [
+        "хуй*", "хуе*", "хуи*", "нахуй", "похуй", "пизд*", "бляд*", "блят*",
+        "еба*", "ебан*", "ебл*", "заеб*", "уеб*", "долбоеб*",
+        "мудак*", "мудач*", "гандон*", "гондон*",
+        "пидор*", "пидар*", "підар*", "підор*",
+        "дебил*", "дебіл*", "сука", "суч*", "курв*", "шлюх*", "чмо",
+        "тупой", "тупая", "тупые", "дурак", "дурач*", "попуск*",
+        "идиот*", "ідіот*", "кретин*", "придурок", "придурк*", "долбан*",
     ],
 }
 
-# Channels whose forwarded posts are allowed (community announcements)
 DEFAULT_ALLOWED_CHANNELS = ["ua_diaspora_dk"]
 
 # =========================================================
 # Admin commands (confirmations self-destruct after 5 s)
 # =========================================================
-@bot.message_handler(commands=['addspam'])
-def handle_add_spam(message):
+def _add_kw_command(message, tier, label):
     if not is_admin(message.chat.id, message.from_user.id):
         return
     keyword = command_arg(message)
     if keyword:
-        add_spam_keyword(keyword, tier='strong')
-        temp_reply(message, f"✅ Added <b>{html.escape(keyword)}</b> as a STRONG keyword (1 hit = delete).")
-        log_event(f"➕ Strong keyword added by {user_label(message.from_user)}: <code>{html.escape(keyword)}</code>")
+        add_spam_keyword(keyword, tier=tier)
+        temp_reply(message, f"✅ Added <b>{html.escape(keyword)}</b> as {label}.")
+        log_event(f"➕ {label} keyword added by {user_label(message.from_user)}: "
+                  f"<code>{html.escape(keyword)}</code>")
     else:
-        temp_reply(message, "Usage: <code>/addspam word or phrase</code>")
+        temp_reply(message, f"Usage: <code>/{message.text.split()[0].lstrip('/')} word or phrase</code>")
+
+@bot.message_handler(commands=['addspam'])
+def handle_add_spam(message):
+    _add_kw_command(message, 'strong', 'STRONG (2 pts)')
 
 @bot.message_handler(commands=['addweak'])
 def handle_add_weak(message):
-    if not is_admin(message.chat.id, message.from_user.id):
-        return
-    keyword = command_arg(message)
-    if keyword:
-        add_spam_keyword(keyword, tier='weak')
-        temp_reply(message, f"✅ Added <b>{html.escape(keyword)}</b> as a WEAK keyword (needs 2 combined hits).")
-        log_event(f"➕ Weak keyword added by {user_label(message.from_user)}: <code>{html.escape(keyword)}</code>")
-    else:
-        temp_reply(message, "Usage: <code>/addweak word or phrase</code>")
+    _add_kw_command(message, 'weak', 'WEAK (1 pt)')
 
-@bot.message_handler(commands=['delspam'])
+@bot.message_handler(commands=['addban'])
+def handle_add_ban(message):
+    _add_kw_command(message, 'ban', 'INSTANT-BAN')
+
+@bot.message_handler(commands=['addtoxic'])
+def handle_add_toxic(message):
+    _add_kw_command(message, 'toxic', 'TOXIC')
+
+@bot.message_handler(commands=['delspam', 'deltoxic'])
 def handle_del_spam(message):
     if not is_admin(message.chat.id, message.from_user.id):
         return
     keyword = command_arg(message)
     if keyword:
         remove_spam_keyword(keyword)
-        temp_reply(message, f"❌ Removed <b>{html.escape(keyword)}</b> from the blacklist.")
-        log_event(f"➖ Keyword removed by {user_label(message.from_user)}: <code>{html.escape(keyword)}</code>")
+        temp_reply(message, f"❌ Removed <b>{html.escape(keyword)}</b>.")
+        log_event(f"➖ Keyword removed by {user_label(message.from_user)}: "
+                  f"<code>{html.escape(keyword)}</code>")
     else:
         temp_reply(message, "Usage: <code>/delspam word or phrase</code>")
 
@@ -434,8 +544,7 @@ def handle_list_spam(message):
         return
     keywords = get_spam_keywords()
     temp_reply(message, f"📋 {len(keywords)} keywords — full list sent to the log channel.")
-    lines = []
-    current_tier = None
+    lines, current_tier = [], None
     for w, tier in keywords:
         if tier != current_tier:
             lines.append(f"\n<b>{tier.upper()}:</b>")
@@ -458,7 +567,7 @@ def handle_allow_fwd(message):
     name = command_arg(message)
     if name:
         allow_channel(name)
-        temp_reply(message, f"✅ Forwards from <b>@{html.escape(name.lstrip('@'))}</b> are now allowed.")
+        temp_reply(message, f"✅ Forwards from <b>@{html.escape(name.lstrip('@'))}</b> allowed.")
         log_event(f"📢 Forward whitelist + <code>{html.escape(name)}</code> by {user_label(message.from_user)}")
     else:
         temp_reply(message, "Usage: <code>/allowfwd @channel_username</code>")
@@ -470,7 +579,7 @@ def handle_del_fwd(message):
     name = command_arg(message)
     if name:
         disallow_channel(name)
-        temp_reply(message, f"❌ Forwards from <b>@{html.escape(name.lstrip('@'))}</b> are no longer allowed.")
+        temp_reply(message, f"❌ Forwards from <b>@{html.escape(name.lstrip('@'))}</b> removed.")
         log_event(f"📢 Forward whitelist - <code>{html.escape(name)}</code> by {user_label(message.from_user)}")
     else:
         temp_reply(message, "Usage: <code>/delfwd @channel_username</code>")
@@ -484,6 +593,45 @@ def handle_list_fwd(message):
     temp_reply(message, "📢 Whitelist sent to the log channel.")
     log_event(f"📢 <b>Allowed forward sources:</b>\n{listing}")
 
+@bot.message_handler(commands=['trust'])
+def handle_trust(message):
+    """Reply to someone's message with /trust to exempt them from
+    flood detection and probation."""
+    if not is_admin(message.chat.id, message.from_user.id):
+        return
+    target = getattr(message.reply_to_message, 'from_user', None) if message.reply_to_message else None
+    if target:
+        set_msg_count(target.id, 100000)
+        temp_reply(message, f"🤝 {html.escape(target.first_name or '')} is now trusted.")
+        log_event(f"🤝 Trusted: {user_label(target)} (by {user_label(message.from_user)})")
+    else:
+        temp_reply(message, "Reply to the user's message with <code>/trust</code>.")
+
+@bot.message_handler(commands=['untrust'])
+def handle_untrust(message):
+    if not is_admin(message.chat.id, message.from_user.id):
+        return
+    target = getattr(message.reply_to_message, 'from_user', None) if message.reply_to_message else None
+    if target:
+        set_msg_count(target.id, 0)
+        temp_reply(message, f"↩️ {html.escape(target.first_name or '')} is no longer trusted.")
+        log_event(f"↩️ Untrusted: {user_label(target)} (by {user_label(message.from_user)})")
+    else:
+        temp_reply(message, "Reply to the user's message with <code>/untrust</code>.")
+
+@bot.message_handler(commands=['pardon'])
+def handle_pardon(message):
+    """Reply with /pardon to clear someone's spam strikes and toxic warnings."""
+    if not is_admin(message.chat.id, message.from_user.id):
+        return
+    target = getattr(message.reply_to_message, 'from_user', None) if message.reply_to_message else None
+    if target:
+        reset_strikes(target.id)
+        temp_reply(message, f"🕊 Strikes cleared for {html.escape(target.first_name or '')}.")
+        log_event(f"🕊 Pardoned: {user_label(target)} (by {user_label(message.from_user)})")
+    else:
+        temp_reply(message, "Reply to the user's message with <code>/pardon</code>.")
+
 @bot.channel_post_handler(commands=['getid'])
 def handle_get_id(message):
     bot.reply_to(message, f"The ID of this channel is: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -491,9 +639,9 @@ def handle_get_id(message):
 # =========================================================
 # New-joiner procedure
 # =========================================================
-_pending_captcha = {}   # (chat_id, user_id) -> {"msg_id": int, "timer": Timer}
+_pending_captcha = {}
 _pending_lock = threading.Lock()
-_recent_joins = {}      # (chat_id, user_id) -> timestamp, dedupes double join events
+_recent_joins = {}
 
 def captcha_timeout(chat_id, user_id, first_name):
     with _pending_lock:
@@ -502,7 +650,8 @@ def captcha_timeout(chat_id, user_id, first_name):
         return
     delete_silently(chat_id, entry["msg_id"])
     soft_kick(chat_id, user_id)
-    log_event(f"⏱ Captcha timeout — removed {html.escape(first_name or '?')} (id <code>{user_id}</code>). They can rejoin.")
+    log_event(f"⏱ Captcha timeout — removed {html.escape(first_name or '?')} "
+              f"(id <code>{user_id}</code>). They can rejoin.")
 
 def process_new_member(chat_id, user):
     if user.is_bot:
@@ -514,7 +663,7 @@ def process_new_member(chat_id, user):
     _recent_joins[key] = now
 
     if is_admin(chat_id, user.id):
-        log_event(f"👤 Admin {user_label(user)} joined — captcha skipped (admins can't be restricted).")
+        log_event(f"👤 Admin {user_label(user)} joined — captcha skipped.")
         return
 
     if check_cas_banned(user.id):
@@ -537,14 +686,12 @@ def process_new_member(chat_id, user):
         f"{CAPTCHA_TIMEOUT // 60} minutes to unlock the chat.",
         reply_markup=markup
     )
-
     timer = threading.Timer(CAPTCHA_TIMEOUT, captcha_timeout,
                             args=(chat_id, user.id, user.first_name))
     timer.daemon = True
     timer.start()
     with _pending_lock:
         _pending_captcha[(chat_id, user.id)] = {"msg_id": sent.message_id, "timer": timer}
-
     log_event(f"👤 New joiner {user_label(user)} — captcha sent.")
 
 @bot.message_handler(content_types=['new_chat_members'])
@@ -554,7 +701,6 @@ def handle_new_member(message):
 
 @bot.chat_member_handler()
 def handle_chat_member_update(update):
-    """Catches joins that produce NO service message."""
     old = update.old_chat_member.status
     new = update.new_chat_member.status
     if new == 'member' and old in ('left', 'kicked'):
@@ -577,13 +723,11 @@ def handle_captcha(call):
     if call.from_user.id != target_user_id:
         bot.answer_callback_query(call.id, "This button is not for you!", show_alert=True)
         return
-
     chat_id = call.message.chat.id
     with _pending_lock:
         entry = _pending_captcha.pop((chat_id, target_user_id), None)
     if entry:
         entry["timer"].cancel()
-
     try:
         bot.restrict_chat_member(
             chat_id, target_user_id,
@@ -596,26 +740,25 @@ def handle_captcha(call):
         )
     except Exception as e:
         print(f"Unmute error: {e}")
-
     mark_verified(target_user_id)
     bot.answer_callback_query(call.id, "Verified! You can text now. Media unlocks in 24 h.")
     delete_silently(chat_id, call.message.message_id)
     log_event(f"✅ Verified: {user_label(call.from_user)}")
 
 # =========================================================
-# Moderation — fully silent in the group.
-# Order: CAS -> channel forwards -> probation -> flood -> keyword scoring
+# Moderation pipeline (silent except toxicity warnings):
+# CAS -> instant-ban checks -> forwards -> probation -> flood
+# -> toxicity -> keyword scoring -> trust counter
 # =========================================================
-DUP_WINDOW = 900     # same text repeated within 15 min = flood
-DUP_MIN_LEN = 80     # only long messages count (so "дякую" repeats are safe)
+DUP_WINDOW = 900
+DUP_MIN_LEN = 80
 _dup_lock = threading.Lock()
-_recent_texts = {}   # hash(normalized text) -> [first_seen_ts, count]
+_recent_texts = {}
 
-def is_duplicate_flood(norm_text):
-    """True from the SECOND identical long message within the window,
-    regardless of which account posts it (spam campaigns rotate accounts)."""
+def duplicate_count(norm_text):
+    """How many times this long text has been seen within the window."""
     if len(norm_text) < DUP_MIN_LEN:
-        return False
+        return 0
     h = hash(norm_text)
     now = time.time()
     with _dup_lock:
@@ -624,26 +767,54 @@ def is_duplicate_flood(norm_text):
         entry = _recent_texts.get(h)
         if entry:
             entry[1] += 1
-            return True
+            return entry[1]
         _recent_texts[h] = [now, 1]
-    return False
+    return 1
 
-def punish(message, reason):
+def punish(message, reason, ban=False):
     chat_id = message.chat.id
     user = message.from_user
     text = message.text or message.caption or ""
     delete_silently(chat_id, message.message_id)
+    if ban:
+        hard_ban(chat_id, user.id)
+        reset_strikes(user.id)
+        log_event(
+            f"🔨 <b>INSTANT BAN</b>\nUser: {user_label(user)}\nReason: {reason}\n"
+            f"Message: {html.escape(text[:800])}"
+        )
+        return
     strikes = add_strike(user.id)
     log_event(
         f"🗑 <b>DELETED</b> — strike {strikes}/{STRIKE_LIMIT}\n"
-        f"User: {user_label(user)}\n"
-        f"Reason: {reason}\n"
+        f"User: {user_label(user)}\nReason: {reason}\n"
         f"Message: {html.escape(text[:800])}"
     )
     if strikes >= STRIKE_LIMIT:
         hard_ban(chat_id, user.id)
         reset_strikes(user.id)
         log_event(f"🔨 <b>USER BANNED</b>: {user_label(user)} ({STRIKE_LIMIT} strikes)")
+
+def handle_toxicity(message, toxic_words):
+    chat_id = message.chat.id
+    user = message.from_user
+    delete_silently(chat_id, message.message_id)
+    count = add_toxic(user.id)
+    name = html.escape(user.first_name or "")
+    if count >= TOXIC_LIMIT:
+        mute_for(chat_id, user.id, TOXIC_MUTE_SECONDS)
+        temp_notice(chat_id, f"🔇 {name} отримує мут на 7 днів за лайку та образи ({count}/{TOXIC_LIMIT}).")
+        log_event(f"🔇 <b>7-DAY MUTE</b>: {user_label(user)} — toxic {count}/{TOXIC_LIMIT} "
+                  f"(matched: {html.escape(', '.join(sorted(toxic_words)))})")
+        with db() as conn:
+            conn.execute("DELETE FROM toxic_strikes WHERE user_id = ?", (user.id,))
+            conn.commit()
+    else:
+        temp_notice(chat_id, f"⚠️ {name}, будь ласка, без лайки та образ. "
+                             f"Попередження {count}/{TOXIC_LIMIT} — далі мут на тиждень.")
+        log_event(f"🤬 Toxic warning {count}/{TOXIC_LIMIT}: {user_label(user)} "
+                  f"(matched: {html.escape(', '.join(sorted(toxic_words)))})\n"
+                  f"Message: {html.escape((message.text or message.caption or '')[:400])}")
 
 def moderate(message):
     chat_id = message.chat.id
@@ -652,6 +823,7 @@ def moderate(message):
         return
 
     text = message.text or message.caption or ""
+    raw = text.lower()
 
     # 1. CAS trap for existing members
     if check_cas_banned(user.id):
@@ -660,7 +832,20 @@ def moderate(message):
         log_event(f"🚨 Banned existing member {user_label(user)} (CAS blacklist).")
         return
 
-    # 2. Messages forwarded from channels = ads, unless whitelisted
+    # 2. Selling tobacco = instant ban
+    if text and SELL_RX.search(raw) and TOBACCO_RX.search(raw):
+        punish(message, "tobacco sale", ban=True)
+        return
+
+    hits = match_keywords(text) if text else {'ban': set(), 'strong': set(),
+                                              'weak': set(), 'toxic': set()}
+
+    # 3. Instant-ban tier keywords
+    if hits['ban']:
+        punish(message, "ban keyword: " + ", ".join(sorted(hits['ban'])), ban=True)
+        return
+
+    # 4. Forwards from non-whitelisted channels
     ch = forwarded_channel(message)
     if ch is not None:
         uname = (getattr(ch, 'username', '') or '').lower()
@@ -671,25 +856,43 @@ def moderate(message):
     if not text:
         return
 
-    # 3. Probation: fresh members can't drop telegram links / @handles
-    if CONTACT_RX.search(text.lower()) and in_probation(user.id):
+    trusted = is_trusted(user.id)
+
+    # 5. Probation: fresh members can't drop telegram links / @handles
+    if not trusted and CONTACT_RX.search(raw) and in_probation(user.id):
         delete_silently(chat_id, message.message_id)
-        log_event(
-            f"🧪 <b>PROBATION</b> — deleted telegram link/@handle from newcomer (no strike)\n"
-            f"User: {user_label(user)}\n"
-            f"Message: {html.escape(text[:400])}"
-        )
+        log_event(f"🧪 <b>PROBATION</b> — deleted telegram link/@handle from newcomer (no strike)\n"
+                  f"User: {user_label(user)}\nMessage: {html.escape(text[:400])}")
         return
 
-    # 4. Identical long message repeated within 15 min = flood campaign
-    if is_duplicate_flood(normalize_text(text)):
-        punish(message, "duplicate flood (same text repeated)")
+    # 6. Duplicate flood — trusted members exempt; strike only from the 3rd copy
+    if not trusted:
+        dup = duplicate_count(normalize_text(text))
+        if dup == 2:
+            delete_silently(chat_id, message.message_id)
+            log_event(f"♻️ Duplicate deleted (no strike) from {user_label(user)}\n"
+                      f"Message: {html.escape(text[:400])}")
+            return
+        if dup >= 3:
+            punish(message, f"duplicate flood (copy #{dup})")
+            return
+
+    # 7. Toxicity: visible warning, 3rd -> 7-day mute
+    if hits['toxic']:
+        handle_toxicity(message, hits['toxic'])
         return
 
-    # 5. Tiered keyword scoring with homoglyph variants
-    score, reason = score_message(text)
+    # 8. Tiered keyword scoring; 5+ = instant ban, 2+ = delete + strike
+    score, reason = score_message(text, hits)
+    if score >= BAN_SCORE_THRESHOLD:
+        punish(message, f"score {score} ({reason})", ban=True)
+        return
     if score >= SPAM_SCORE_THRESHOLD:
         punish(message, f"score {score} ({reason})")
+        return
+
+    # 9. Clean message — grow the user's trust counter
+    bump_msg_count(user.id)
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'animation'])
 def filter_spam(message):
@@ -711,8 +914,8 @@ def filter_edited_spam(message):
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=run_web, daemon=True).start()
-    print(f"V6 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, "
-          f"tiered scoring ON, silent mode ON.")
+    print(f"V7 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, "
+          f"tiers ban/strong/weak/toxic, trust system ON.")
     bot.infinity_polling(allowed_updates=[
         'message', 'edited_message', 'channel_post', 'callback_query', 'chat_member'
     ])
