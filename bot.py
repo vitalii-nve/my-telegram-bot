@@ -49,7 +49,7 @@ def run_web():
 # Text normalization + homoglyph handling
 # =========================================================
 ZERO_WIDTH = dict.fromkeys(map(ord, '\u200b\u200c\u200d\u2060\ufeff'), None)
-LAT_TO_CYR = str.maketrans('aceiopxyk03', 'асеіорхукоз')
+LAT_TO_CYR = str.maketrans('aceiopxykr03', 'асеіорхукроз')
 CYR_TO_LAT = str.maketrans('асеіорхук0', 'aceiopxyko')
 
 def normalize_text(text):
@@ -69,10 +69,13 @@ def normalize_keyword(word):
 
 def text_variants(text):
     base = normalize_text(text)
-    return {base, base.translate(LAT_TO_CYR), base.translate(CYR_TO_LAT)}
+    collapsed = re.sub(r'(.)\1+', r'\1', base)  # юсддт -> юсдт, тезррр -> тезр
+    return {base, collapsed,
+            base.translate(LAT_TO_CYR), collapsed.translate(LAT_TO_CYR),
+            base.translate(CYR_TO_LAT)}
 
 # ---- Patterns checked on RAW (lowercased) text ----
-CONTACT_RX = re.compile(r'@[a-zA-Z][a-zA-Z0-9_]{3,}|t\.me/|telegram\.me/', re.I)
+CONTACT_RX = re.compile(r'@\s{0,2}[a-zA-Z][a-zA-Z0-9_]{3,}|t\.me/|telegram\.me/', re.I)
 CURRENCY = r'(?:usdt?|euro?|dkk|kroner|kr|евро|євро|крон\w*|грн|грив\w*|долл\w*|долар\w*)'
 MONEY_RX = re.compile(
     r'[\$€£₴]\s*\d|\d\s*[\$€£₴]|'
@@ -80,7 +83,16 @@ MONEY_RX = re.compile(
 # "700 евро в неделю" / "260 долларов США в день" — EUR/USD pay-rate promises
 PAYRATE_RX = re.compile(
     r'\d[\d\s.,]*\s*(?:[\$€]|usdt?|euro?|евро|євро|долл\w*|долар\w*)\s*(?:сша|usa)?\s*'
-    r'(?:в|на|per|/)\s*(?:день|сутки|неделю|месяц|тиждень|місяць|day|week|month)', re.I)
+    r'(?:в|на|per|/)\s*(?:день|сутки|неделю|месяц|місяць|мес|міс|тиждень|day|week|month)', re.I)
+# Age-bracket recruiting ("від 17 до 40 років", "18-45 лет") — scam-ad signature
+AGE_RANGE_RX = re.compile(r'(?:від|от)?\s*\d{2}\s*(?:до|[-–—])\s*\d{2}\s*(?:років|роки|лет)', re.I)
+# Cyrillic tether/TRC mutations: юсдт, юсддт, усдт, тезр, тезер, тезррр, тезцер, Тезеr
+TETHER_SLANG_RX = re.compile(r'(?<!\w)(?:юсд+т|усд+т|тез\w{0,4}р)\w*', re.I)
+TRC_SLANG_RX = re.compile(r'(?<!\w)(?:т[рp]{1,3}[схкц]|t[рr]{1,2}[cс])\s?20', re.I)
+# The *tophr recruiting campaign (@maxtophr, @katetophr, Darynatophr) = instant ban
+CAMPAIGN_RX = re.compile(r'\w*tophr\b', re.I)
+# CJK spam (Chinese adult-bot ads) — no legitimate CJK traffic in this group
+CJK_RX = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff]{4,}')
 # Selling tobacco = instant ban ("продам сигарети/сігарети/цигарки/вейпи...")
 SELL_RX = re.compile(r'(?<!\w)(?:продам|продаю|продаж\w*|є в наявності|в наличии)(?!\w)', re.I)
 TOBACCO_RX = re.compile(
@@ -89,8 +101,10 @@ TOBACCO_RX = re.compile(
 # P2P crypto deals ("куплю юсдт", "продам usdt за нал") — +1 scoring point
 CRYPTO_TRADE_RX = re.compile(
     r'(?<!\w)(?:куплю|купить|купити|продам|продаю|обмен\w*|обміня\w*|обмін|'
-    r'вывод\w*|виведу|обнал\w*)(?!\w).{0,80}?'
-    r'(?:usdt|юсдт|усдт|тезер|tether|крипт\w*|біткоїн\w*|биткоин\w*|btc)', re.I | re.S)
+    r'вывод\w*|виведу|обнал\w*|приобрет\w*|интересу\w*|цікав\w*|'
+    r'нужен|нужны|потрібен|необходим\w*)(?!\w).{0,80}?'
+    r'(?:usdt|юсд+т|усд+т|тез\w{0,4}р|tether|крипт\w*|біткоїн\w*|биткоин\w*|btc|'
+    r'цифров\w{0,3}\s?актив\w*|т[рp]{1,3}[схкц]\s?20)', re.I | re.S)
 
 # =========================================================
 # Database
@@ -265,10 +279,14 @@ def score_message(raw_text, hits):
     money_contact = bool(MONEY_RX.search(raw) and CONTACT_RX.search(raw))
     payrate = bool(PAYRATE_RX.search(raw))
     crypto_trade = bool(CRYPTO_TRADE_RX.search(raw))
+    age_range = bool(AGE_RANGE_RX.search(raw))
+    tether_slang = bool(TETHER_SLANG_RX.search(raw))
+    trc_slang = bool(TRC_SLANG_RX.search(raw))
 
     score = (2 * len(hits['strong']) + len(hits['weak'])
              + (1 if money_contact else 0) + (1 if payrate else 0)
-             + (1 if crypto_trade else 0))
+             + (1 if crypto_trade else 0) + (1 if age_range else 0)
+             + (2 if tether_slang else 0) + (2 if trc_slang else 0))
     parts = []
     if hits['strong']:
         parts.append("strong: " + ", ".join(sorted(hits['strong'])))
@@ -280,6 +298,12 @@ def score_message(raw_text, hits):
         parts.append("pattern: pay-rate promise")
     if crypto_trade:
         parts.append("pattern: crypto trade")
+    if age_range:
+        parts.append("pattern: age range")
+    if tether_slang:
+        parts.append("pattern: tether slang")
+    if trc_slang:
+        parts.append("pattern: trc20 slang")
     return score, " | ".join(parts)
 
 # =========================================================
@@ -421,6 +445,9 @@ DEFAULT_KEYWORDS = {
         "чекаю на ваші повідомлення",
         "дивіться в профілі", "дивись в профілі", "інфа в профілі",
         "набираю дітей", "набір дітей", "шукаю дівчаток",
+        "набираємо дівчаток", "оператор чату", "онлайн вакансі*",
+        "онлайн діяльність", "вакансію мрії", "вмієш клацати",
+        "розміщуй вакансії", "розміщувати рекламу", "цифрові активи",
         # Russian
         "бонус за регистрацию", "эскорт", "интим",
         "схема заработка", "рабочая схема", "бесплатные деньги", "халява",
@@ -436,6 +463,8 @@ DEFAULT_KEYWORDS = {
         "юсдт", "усдт", "тезер*",
         "ищем русскоязычных", "набираю ребят", "набираю детей", "набор детей",
         "ищу девушек", "ищу девочек",
+        "оператор чата", "онлайн вакансии", "цифровые активы",
+        "размещай вакансии", "размещать рекламу",
     ],
     'weak': [
         # English
@@ -480,6 +509,19 @@ DEFAULT_KEYWORDS = {
         "оплата на карту", "продам евро", "куплю евро", "обмен валют", "за нал",
         "количество мест ограничено", "узнать детали",
         "сигареты", "сигарети", "цигарки",
+        "без досвіду", "без опыта", "жодних дзвінків", "без дзвінків", "без звонков",
+        "робота за ноутбуком", "работа за ноутбуком", "робота у ноутбуці",
+        "щотижневі виплати", "еженедельные выплаты", "виплати в перший тиждень",
+        "ставка від", "ставка от",
+        "кадровий менеджер", "кадрового менеджера", "кадрові менеджери",
+        "кадровый менеджер", "кадровые менеджеры",
+        "безкоштовне житло", "безкоштовне проживання",
+        "бесплатное жилье", "бесплатное проживание",
+        "житло за рахунок", "жилье за счет",
+        "гнучкий графік", "звертайся в особисті", "стукай в оп", "в оп",
+        "наличные средства", "готівкові кошти",
+        "при личной встрече", "личное присутствие", "особиста зустріч",
+        "можу поділитися контактом", "могу поделиться контактом",
     ],
     'toxic': [
         "хуй*", "хуе*", "хуи*", "нахуй", "похуй", "пизд*", "бляд*", "блят*",
@@ -832,7 +874,17 @@ def moderate(message):
         log_event(f"🚨 Banned existing member {user_label(user)} (CAS blacklist).")
         return
 
-    # 2. Selling tobacco = instant ban
+    # 2. Known recruiting-campaign handles (*tophr) = instant ban
+    if text and CAMPAIGN_RX.search(raw):
+        punish(message, "campaign handle (*tophr)", ban=True)
+        return
+
+    # 2a. CJK spam (Chinese bot ads) from non-established members
+    if text and CJK_RX.search(text) and not is_trusted(user.id):
+        punish(message, "CJK spam")
+        return
+
+    # 2b. Selling tobacco = instant ban
     if text and SELL_RX.search(raw) and TOBACCO_RX.search(raw):
         punish(message, "tobacco sale", ban=True)
         return
@@ -850,7 +902,14 @@ def moderate(message):
     if ch is not None:
         uname = (getattr(ch, 'username', '') or '').lower()
         if uname not in get_allowed_channels() and str(ch.id) not in get_allowed_channels():
-            punish(message, f"forward from channel @{html.escape(uname) if uname else ch.id}")
+            fwd_score, fwd_reason = score_message(text, hits) if text else (0, "")
+            src_label = f"@{html.escape(uname)}" if uname else str(ch.id)
+            if fwd_score >= SPAM_SCORE_THRESHOLD:
+                punish(message, f"forward from channel {src_label}, score {fwd_score} ({fwd_reason})")
+            else:
+                delete_silently(chat_id, message.message_id)
+                log_event(f"📤 Forward deleted (no strike) from {user_label(user)} "
+                          f"— source channel {src_label}\nMessage: {html.escape(text[:400])}")
             return
 
     if not text:
@@ -914,7 +973,7 @@ def filter_edited_spam(message):
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=run_web, daemon=True).start()
-    print(f"V7 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, "
+    print(f"V8 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, "
           f"tiers ban/strong/weak/toxic, trust system ON.")
     bot.infinity_polling(allowed_updates=[
         'message', 'edited_message', 'channel_post', 'callback_query', 'chat_member'
