@@ -29,6 +29,7 @@ TOXIC_MUTE_SECONDS = 7 * 86400 # "ban for a week" = 7-day mute
 TOXIC_TTL = 30 * 86400         # profanity counter decays after 30 days
 ADMIN_CACHE_TTL = 300
 CAS_CACHE_TTL = 3600
+BAN_CJK_NAMES = True           # Chinese/Japanese/Korean display names: ban on join / first message
 
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -85,26 +86,63 @@ PAYRATE_RX = re.compile(
     r'\d[\d\s.,]*\s*(?:[\$€]|usdt?|euro?|евро|євро|долл\w*|долар\w*)\s*(?:сша|usa)?\s*'
     r'(?:в|на|per|/)\s*(?:день|сутки|неделю|месяц|місяць|мес|міс|тиждень|day|week|month)', re.I)
 # Age-bracket recruiting ("від 17 до 40 років", "18-45 лет") — scam-ad signature
-AGE_RANGE_RX = re.compile(r'(?:від|от)?\s*\d{2}\s*(?:до|[-–—])\s*\d{2}\s*(?:років|роки|лет)', re.I)
+AGE_RANGE_RX = re.compile(r'(?:від|от)?\s*\d{1,2}\s*(?:до|[-–—])\s*\d{2}\s*(?:років|роки|лет)', re.I)
 # Cyrillic tether/TRC mutations: юсдт, юсддт, усдт, тезр, тезер, тезррр, тезцер, Тезеr
 TETHER_SLANG_RX = re.compile(r'(?<!\w)(?:юсд+т|усд+т|тез\w{0,4}р)\w*', re.I)
 TRC_SLANG_RX = re.compile(r'(?<!\w)(?:т[рp]{1,3}[схкц]|t[рr]{1,2}[cс])\s?20', re.I)
-# The *tophr recruiting campaign (@maxtophr, @katetophr, Darynatophr) = instant ban
-CAMPAIGN_RX = re.compile(r'\w*tophr\b', re.I)
+# Known scam-recruiting campaign handles (@maxtophr, @katetophr, Darynatophr, @maximkahr) = instant ban
+CAMPAIGN_RX = re.compile(r'\w*(?:tophr|kahr)\b', re.I)
 # CJK spam (Chinese adult-bot ads) — no legitimate CJK traffic in this group
 CJK_RX = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff]{4,}')
 # Selling tobacco = instant ban ("продам сигарети/сігарети/цигарки/вейпи...")
-SELL_RX = re.compile(r'(?<!\w)(?:продам|продаю|продаж\w*|є в наявності|в наличии)(?!\w)', re.I)
+SELL_RX = re.compile(r'(?<!\w)(?:продам|продаю|продається|продаються|на\s+продаж\w*|є в наявності|в наличии)(?!\w)', re.I)
 TOBACCO_RX = re.compile(
-    r'сигарет\w*|сігарет\w*|сиграет\w*|сігрaет\w*|цигарк\w*|цыгарк\w*|'
-    r'тютюн\w*|табак\w*|айкос\w*|iqos|стіки|стики|вейп\w*|одноразк\w*|снюс\w*', re.I)
+    r'(?<!\w)(?:сигарет\w*|сігарет\w*|сиграет\w*|сігрaет\w*|цигарк\w*|цыгарк\w*|'
+    r'тютюн(?:у|ом|ові)?|табак\w*|айкос\w*|iqos|стіки|стики|вейп\w*|одноразк\w*|снюс\w*)(?!\w)', re.I)
 # P2P crypto deals ("куплю юсдт", "продам usdt за нал") — +1 scoring point
 CRYPTO_TRADE_RX = re.compile(
-    r'(?<!\w)(?:куплю|купить|купити|продам|продаю|обмен\w*|обміня\w*|обмін|'
+    r'(?<!\w)(?:куплю|купить|купити|продам|продаю|продать|продати|обмен\w*|обміня\w*|обмін|'
     r'вывод\w*|виведу|обнал\w*|приобрет\w*|интересу\w*|цікав\w*|'
     r'нужен|нужны|потрібен|необходим\w*)(?!\w).{0,80}?'
     r'(?:usdt|юсд+т|усд+т|тез\w{0,4}р|tether|крипт\w*|біткоїн\w*|биткоин\w*|btc|'
     r'цифров\w{0,3}\s?актив\w*|т[рp]{1,3}[схкц]\s?20)', re.I | re.S)
+
+
+# ---- V9 additions (patterns learned from the Nov 2026 field batch) ----
+CJK_NAME_RX = re.compile(r'[一-鿿぀-ヿ가-힯]{2,}')
+
+def has_cjk_name(user):
+    """Chinese/Japanese/Korean display name — the '竹叶宥秘技 posts "1"' bot accounts."""
+    name = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}"
+    return bool(CJK_NAME_RX.search(name))
+
+# Coin tickers glued to other words ("USDTза наличные") — deliberately no word boundaries
+TICKER_RX = re.compile(r'usdt|ustd|usdc|trc\s?-?\s?20|erc\s?-?\s?20', re.I)
+
+# Dealing in actual money: "продам 1 т. доларів", "куплю євро", "обміняти їх на крони"
+FX_WORDS = r'(?:долар\w*|доллар\w*|євро|евро|гривн\w*|гривен\w*|грн|крон\w*|usd\w*|eur\b|dkk|usdt)'
+FX_TRADE_RX = re.compile(
+    r'(?<!\w)(?:продам|продаю|продати|продать|куплю|купити|купить|поміняю|обміняю|поменяю|обменяю)(?!\w)'
+    r'\s+(?:\d[\d\s.,]*\s*(?:т\.?|тис\.?|тисяч\w*|k|к)?\s*)?' + FX_WORDS
+    + r'|(?<!\w)(?:обмін\w*|обміня\w*|обмен\w*|поміня\w*|поменя\w*)(?!\w).{0,40}?' + FX_WORDS,
+    re.I | re.S)
+QUESTION_RX = re.compile(r'(?<!\w)(?:де|як|где|как|підкажіть|подскажите|чи\s+можна|можно\s+ли|чи\s+є|чи\s+потрібно)(?!\w)', re.I)
+CASHCARD_RX = re.compile(r'на\s+карт(?:ку|у|ці|е)|готівк\w*|наличн\w*|за\s+нал\b', re.I)
+AREA_RX = re.compile(r'(?<!\w)район\w*\s+(?:[^\W\d_]+\s+){0,2}\d{4}(?!\d)', re.I)
+
+# Phone numbers (+380… / +45…)
+PHONE_RX = re.compile(r'(?<!\d)\+?\s?(?:380|45)[\s\-()]*\d(?:[\s\-()]*\d){7,9}(?!\d)')
+
+# Referral code like "(CPMCRJT4G)" — only counted next to the word "код"
+REFCODE_RX = re.compile(r'\((?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,12}\)')
+
+# "@ username" with a space after @ — dodges Telegram's link detection
+SPACED_HANDLE_RX = re.compile(r'@\s+[a-z][a-z0-9_]{3,}', re.I)
+
+# Selling accounts ("продам ТГ, Вацап, Вайбер аккаунты") = instant ban
+ACCOUNT_SALE_RX = re.compile(
+    r'(?<!\w)(?:продам|продаю|продаж\w*|продать|продати|скупаю)(?!\w).{0,60}?(?:аккаунт\w*|акаунт\w*|account\w*)',
+    re.I | re.S)
 
 # =========================================================
 # Database
@@ -126,6 +164,8 @@ def init_db():
                   '(user_id INTEGER PRIMARY KEY, msg_count INTEGER DEFAULT 0)')
         c.execute('CREATE TABLE IF NOT EXISTS toxic_strikes '
                   '(user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0, last_at REAL DEFAULT 0)')
+        # Keywords the admins added/removed by command: seeding must never undo these
+        c.execute('CREATE TABLE IF NOT EXISTS kw_admin (word TEXT PRIMARY KEY, action TEXT)')
         conn.commit()
         for stmt in ("ALTER TABLE user_strikes ADD COLUMN last_at REAL DEFAULT 0",
                      "ALTER TABLE spam_keywords ADD COLUMN tier TEXT DEFAULT 'strong'"):
@@ -134,8 +174,17 @@ def init_db():
                 conn.commit()
             except sqlite3.OperationalError:
                 pass
+    with db() as conn:
+        admin_words = {r[0] for r in conn.execute("SELECT word FROM kw_admin")}
+        for old in OBSOLETE_DEFAULTS:           # defaults retired in code
+            n = normalize_keyword(old)
+            if n not in admin_words:
+                conn.execute("DELETE FROM spam_keywords WHERE word = ?", (n,))
+        conn.commit()
     for tier, words in DEFAULT_KEYWORDS.items():
         for w in words:
+            if normalize_keyword(w) in admin_words:   # admin removed/changed it — respect that
+                continue
             add_spam_keyword(w, tier=tier, rebuild=False)
     for ch in DEFAULT_ALLOWED_CHANNELS:
         allow_channel(ch)
@@ -186,21 +235,25 @@ def is_trusted(user_id):
                            (user_id,)).fetchone()
     return bool(row) and row[0] >= TRUSTED_MIN_MESSAGES
 
-def add_spam_keyword(word, tier='strong', rebuild=True):
+def add_spam_keyword(word, tier='strong', rebuild=True, by_admin=False):
     word = normalize_keyword(word)
     if not word:
         return
     with db() as conn:
         conn.execute("INSERT INTO spam_keywords (word, tier) VALUES (?, ?) "
                      "ON CONFLICT(word) DO UPDATE SET tier = excluded.tier", (word, tier))
+        if by_admin:
+            conn.execute("INSERT OR REPLACE INTO kw_admin (word, action) VALUES (?, 'pinned')", (word,))
         conn.commit()
     if rebuild:
         rebuild_patterns()
 
-def remove_spam_keyword(word, rebuild=True):
+def remove_spam_keyword(word, rebuild=True, by_admin=False):
     word = normalize_keyword(word)
     with db() as conn:
         conn.execute("DELETE FROM spam_keywords WHERE word = ?", (word,))
+        if by_admin:
+            conn.execute("INSERT OR REPLACE INTO kw_admin (word, action) VALUES (?, 'removed')", (word,))
         conn.commit()
     if rebuild:
         rebuild_patterns()
@@ -282,29 +335,66 @@ def score_message(raw_text, hits):
     age_range = bool(AGE_RANGE_RX.search(raw))
     tether_slang = bool(TETHER_SLANG_RX.search(raw))
     trc_slang = bool(TRC_SLANG_RX.search(raw))
+    # tickers glued to words ("USDTза") — skip if the keyword list already counted them
+    ticker = bool(TICKER_RX.search(raw)) and not ({'usdt', 'ustd', 'trc20', 'erc20'} & hits['strong'])
+    # dealing in cash/currency; card/cash wording and a postcode area only count together with it
+    fx = bool(FX_TRADE_RX.search(raw)) and not QUESTION_RX.search(raw)
+    fx_cash = fx and bool(CASHCARD_RX.search(raw))
+    fx_area = fx and bool(AREA_RX.search(raw))
+    # phone numbers: one is normal (translators, lost phone), two = mild signal, three+ = ad
+    phones = PHONE_RX.findall(raw)
+    phone_pts = 2 if len(phones) >= 3 else (1 if len(phones) == 2 else 0)
+    spaced = bool(SPACED_HANDLE_RX.search(raw))
+    refcode = bool(REFCODE_RX.search(raw_text)) and 'код' in raw
 
     score = (2 * len(hits['strong']) + len(hits['weak'])
              + (1 if money_contact else 0) + (1 if payrate else 0)
              + (1 if crypto_trade else 0) + (1 if age_range else 0)
-             + (2 if tether_slang else 0) + (2 if trc_slang else 0))
+             + (2 if tether_slang else 0) + (2 if trc_slang else 0)
+             + (2 if ticker else 0) + (1 if fx else 0) + (1 if fx_cash else 0)
+             + (1 if fx_area else 0) + phone_pts + (1 if spaced else 0)
+             + (1 if refcode else 0))
     parts = []
     if hits['strong']:
         parts.append("strong: " + ", ".join(sorted(hits['strong'])))
     if hits['weak']:
         parts.append("weak: " + ", ".join(sorted(hits['weak'])))
-    if money_contact:
-        parts.append("pattern: money+contact")
-    if payrate:
-        parts.append("pattern: pay-rate promise")
-    if crypto_trade:
-        parts.append("pattern: crypto trade")
-    if age_range:
-        parts.append("pattern: age range")
-    if tether_slang:
-        parts.append("pattern: tether slang")
-    if trc_slang:
-        parts.append("pattern: trc20 slang")
+    for flag, label in ((money_contact, "money+contact"), (payrate, "pay-rate promise"),
+                        (crypto_trade, "crypto trade"), (age_range, "age range"),
+                        (tether_slang, "tether slang"), (trc_slang, "trc20 slang"),
+                        (ticker, "coin ticker"), (fx, "currency deal"),
+                        (fx_cash, "card/cash"), (fx_area, "postcode area"),
+                        (phone_pts, f"phone x{len(phones)}"), (spaced, "spaced @handle"),
+                        (refcode, "referral code")):
+        if flag:
+            parts.append("pattern: " + label)
     return score, " | ".join(parts)
+
+def _verdict(action, reason, hits=None, score=0):
+    return {'action': action, 'reason': reason, 'hits': hits, 'score': score}
+
+def classify_text(text):
+    """Pure text verdict (no Telegram calls — the test suite uses it too).
+    action: 'ban' | 'strike' | 'toxic' | 'pass'. Spam is judged BEFORE toxicity,
+    so an ad that happens to contain a swear word is still treated as an ad."""
+    raw = text.lower()
+    if CAMPAIGN_RX.search(raw):
+        return _verdict('ban', 'campaign handle (*tophr / *kahr)')
+    if SELL_RX.search(raw) and TOBACCO_RX.search(raw):
+        return _verdict('ban', 'tobacco sale')
+    if ACCOUNT_SALE_RX.search(raw):
+        return _verdict('ban', 'account sale')
+    hits = match_keywords(text)
+    if hits['ban']:
+        return _verdict('ban', 'ban keyword: ' + ', '.join(sorted(hits['ban'])), hits)
+    score, reason = score_message(text, hits)
+    if score >= BAN_SCORE_THRESHOLD:
+        return _verdict('ban', f'score {score} ({reason})', hits, score)
+    if score >= SPAM_SCORE_THRESHOLD:
+        return _verdict('strike', f'score {score} ({reason})', hits, score)
+    if hits['toxic']:
+        return _verdict('toxic', 'toxic: ' + ', '.join(sorted(hits['toxic'])), hits, score)
+    return _verdict('pass', f'score {score} ({reason})', hits, score)
 
 # =========================================================
 # Caches
@@ -413,126 +503,134 @@ def forwarded_channel(message):
 
 # =========================================================
 # Default keyword library
-#   ban    -> one hit = delete + PERMANENT BAN (admin-managed, starts empty)
+#   ban    -> one hit = delete + PERMANENT BAN (very specific phrases only)
 #   strong -> 2 points  |  weak -> 1 point  (threshold 2 = delete+strike,
 #   5+ = delete+ban)    |  toxic -> profanity counter (3 -> 7-day mute)
 # =========================================================
 DEFAULT_KEYWORDS = {
-    'ban': [],
+    'ban': [
+        "нелегальных способов", "нелегальный выезд", "нелегальний виїзд", "услуги по пересечению",
+        "послуги з перетину кордону", "послуги по перетину кордону",
+    ],
     'strong': [
-        # English
         "casino", "jackpot", "free spins", "1win",
         "onlyfans", "escort", "sugar daddy", "sugar mommy",
-        "adult content", "hot photos", "private photos",
-        "airdrop", "trading signals", "crypto signals", "pump and dump",
-        "binary options", "guaranteed profit", "guaranteed income",
-        "double your money", "cloud mining", "mining pool",
-        "usdt", "ustd", "trc20", "erc20", "tether",
-        "free money", "easy money", "quick cash", "fast cash",
-        "get rich", "financial freedom", "passive income",
-        "telegram premium free", "free premium",
-        # Ukrainian
-        "казино", "ставки на спорт", "букмекер", "бонус за реєстрацію",
-        "ескорт", "інтим", "вебкам",
-        "схема заробітку", "робоча схема", "безкоштовні гроші",
-        "легкі гроші", "швидкі гроші", "заробіток в інтернеті",
-        "пасивний дохід", "надішлю інформацію",
-        "набір у команду",
-        "розкрити свій потенціал",
-        "онлайн співпрац*", "робота з телефону", "навчання з нуля",
-        "заняття безкоштовно", "урок безкоштовно",
-        "пробне заняття", "пробний урок",
-        "чекаю на ваші повідомлення",
-        "дивіться в профілі", "дивись в профілі", "інфа в профілі",
-        "набираю дітей", "набір дітей", "шукаю дівчаток",
-        "набираємо дівчаток", "оператор чату", "онлайн вакансі*",
-        "онлайн діяльність", "вакансію мрії", "вмієш клацати",
-        "розміщуй вакансії", "розміщувати рекламу", "цифрові активи",
-        # Russian
-        "бонус за регистрацию", "эскорт", "интим",
-        "схема заработка", "рабочая схема", "бесплатные деньги", "халява",
-        "легкие деньги", "быстрые деньги", "заработок в интернете",
-        "пассивный доход", "пришлю информацию", "пришлю вам интересующую",
-        "набор в команду",
-        "раскрыть свой потенциал", "справляться с любыми задачами",
-        "онлайн сотрудничеств*", "работа с телефона", "обучение с нуля",
-        "занятие бесплатно", "урок бесплатно",
-        "пробное занятие", "пробный урок",
-        "жду ваши сообщения", "жду ваших сообщений", "ожидаю вашего сообщения",
+        "adult content", "hot photos", "private photos", "airdrop",
+        "trading signals", "crypto signals", "pump and dump", "binary options",
+        "guaranteed profit", "guaranteed income", "double your money", "cloud mining",
+        "mining pool", "usdt", "ustd", "trc20",
+        "erc20", "tether", "free money", "easy money",
+        "quick cash", "fast cash", "get rich", "financial freedom",
+        "passive income", "telegram premium free", "free premium", "казино",
+        "ставки на спорт", "букмекер", "бонус за реєстрацію", "ескорт",
+        "інтим", "вебкам", "схема заробітку", "робоча схема",
+        "безкоштовні гроші", "легкі гроші", "швидкі гроші", "заробіток в інтернеті",
+        "пасивний дохід", "надішлю інформацію", "набір у команду", "розкрити свій потенціал",
+        "онлайн співпрац*", "робота з телефону", "навчання з нуля", "заняття безкоштовно",
+        "урок безкоштовно", "чекаю на ваші повідомлення", "дивіться в профілі", "дивись в профілі",
+        "інфа в профілі", "набираю дітей", "шукаю дівчаток", "набираємо дівчаток",
+        "оператор чату", "онлайн вакансі*", "онлайн діяльність", "вакансію мрії",
+        "вмієш клацати", "розміщуй вакансії", "розміщувати рекламу", "цифрові активи",
+        "бонус за регистрацию", "эскорт", "интим", "схема заработка",
+        "рабочая схема", "бесплатные деньги", "халява", "легкие деньги",
+        "быстрые деньги", "заработок в интернете", "пассивный доход", "пришлю информацию",
+        "пришлю вам интересующую", "набор в команду", "раскрыть свой потенциал", "справляться с любыми задачами",
+        "онлайн сотрудничеств*", "работа с телефона", "обучение с нуля", "занятие бесплатно",
+        "урок бесплатно", "жду ваши сообщения", "жду ваших сообщений", "ожидаю вашего сообщения",
         "смотрите в профиле", "смотри в профиле", "инфо в профиле", "инфа в профиле",
-        "юсдт", "усдт", "тезер*",
-        "ищем русскоязычных", "набираю ребят", "набираю детей", "набор детей",
-        "ищу девушек", "ищу девочек",
-        "оператор чата", "онлайн вакансии", "цифровые активы",
-        "размещай вакансии", "размещать рекламу",
+        "юсдт", "усдт", "тезер*", "ищем русскоязычных",
+        "набираю ребят", "набираю детей", "ищу девушек", "ищу девочек",
+        "оператор чата", "онлайн вакансии", "цифровые активы", "размещай вакансии",
+        "размещать рекламу",
+        # --- Nov 2026 batch ---
+        "перевезення пасажирів", "збір посилок", "пасажирські буси", "оплату згоджуємо",
+        "оплату узгоджуємо", "дайте своїй дитині", "залипає у телефоні", "залипає в телефоні",
+        "майстер клас з програмування", "с авто и без", "з авто і без", "з авто та без",
+        "готую учнів", "урок безкоштов*", "заняття безкоштов*", "урок бесплатн*",
+        "занятие бесплатн*", "розмістіть рекламу", "розмістити рекламу", "разместите рекламу",
+        "разместить рекламу", "залучити нових клієнтів", "реферальний код", "реферальный код",
+        "фізичні сімки", "физические симки", "принять любое смс", "принять смс",
+        "прийняти смс", "новоделы", "бесплатно консультирую", "безкоштовно консультую",
     ],
     'weak': [
-        # English
-        "crypto", "bitcoin", "invest", "forex", "binance", "giveaway",
-        "dm me", "join channel", "work from home", "no experience needed",
-        "limited spots", "click the link", "link in bio", "check my bio",
-        "referral link", "earn cash", "earn daily", "daily profit",
-        "weekly payout", "instant payout", "promo code",
-        "sign up bonus", "welcome bonus", "presale",
-        # Ukrainian
-        "крипта", "криптовалюта", "біткоїн", "інвестиції", "інвестувати",
-        "трейдинг", "сигнали", "заробіток", "заробити", "дохід", "доходу", "доходів",
+        "crypto", "bitcoin", "invest", "forex",
+        "binance", "giveaway", "dm me", "join channel",
+        "work from home", "no experience needed", "limited spots", "click the link",
+        "link in bio", "check my bio", "referral link", "earn cash",
+        "earn daily", "daily profit", "weekly payout", "instant payout",
+        "promo code", "sign up bonus", "welcome bonus", "presale",
+        "крипта", "криптовалюта", "біткоїн", "інвестиції",
+        "інвестувати", "трейдинг", "сигнали", "заробіток",
+        "заробити", "дохід", "доходу", "доходів",
         "зарплата від", "гарна зарплата", "без вкладень", "вкладення від",
-        "щоденні виплати", "виплати щодня", "потрібні люди",
-        "набираємо людей", "шукаємо людей", "потрібен персонал",
-        "віддалена робота", "робота вдома", "вільний графік",
-        "пиши в пп", "в пп", "пиши в особисті", "пишіть в особисті",
-        "в приватні повідомлення", "деталі в особистих",
-        "звертайтесь в особисті", "звертайтеся в особисті", "у приват", "в приват",
-        "переходь за посиланням", "тисни на посилання",
-        "телеграм канал", "приєднуйся", "бонус", "промокод",
-        "розіграш", "ставки",
-        "виїзд", "виїзд за кордон", "білий квиток", "відстрочка", "сзч",
-        "оплата на картку", "продам євро", "куплю євро", "обмін валют",
-        "кількість місць обмежена", "дізнатися деталі",
-        # Russian
-        "биткоин", "инвестиции", "инвестировать", "трейдинг", "трейдер",
-        "сигналы", "заработок", "заработать", "доход", "дохода",
-        "потенциал дохода",
-        "зарплата от", "хорошая зарплата", "без вложений", "вложения от",
-        "ежедневные выплаты", "выплаты каждый день", "первые выплаты",
-        "нужны люди", "набираем людей", "ищем людей",
-        "требуются сотрудники", "требуются люди", "нужен персонал",
-        "удаленная работа", "работа на дому", "удаленный формат",
-        "дистанционн*", "русскоязычн*", "свободный график", "гибкий график",
-        "совмещение с основной",
-        "пиши в лс", "пишите в лс", "в лс", "пиши в личку", "пишите в личку",
-        "в личные сообщения", "подробности в лс",
-        "переходи по ссылке", "жми на ссылку", "приватный канал",
-        "розыгрыш",
-        "выезд", "выезд за границу", "белый билет", "отсрочка",
-        "оплата на карту", "продам евро", "куплю евро", "обмен валют", "за нал",
-        "количество мест ограничено", "узнать детали",
-        "сигареты", "сигарети", "цигарки",
-        "без досвіду", "без опыта", "жодних дзвінків", "без дзвінків", "без звонков",
-        "робота за ноутбуком", "работа за ноутбуком", "робота у ноутбуці",
-        "щотижневі виплати", "еженедельные выплаты", "виплати в перший тиждень",
-        "ставка від", "ставка от",
-        "кадровий менеджер", "кадрового менеджера", "кадрові менеджери",
-        "кадровый менеджер", "кадровые менеджеры",
-        "безкоштовне житло", "безкоштовне проживання",
-        "бесплатное жилье", "бесплатное проживание",
-        "житло за рахунок", "жилье за счет",
-        "гнучкий графік", "звертайся в особисті", "стукай в оп", "в оп",
-        "наличные средства", "готівкові кошти",
-        "при личной встрече", "личное присутствие", "особиста зустріч",
-        "можу поділитися контактом", "могу поделиться контактом",
+        "щоденні виплати", "виплати щодня", "потрібні люди", "набираємо людей",
+        "шукаємо людей", "потрібен персонал", "віддалена робота", "робота вдома",
+        "вільний графік", "пиши в пп", "в пп", "пиши в особисті",
+        "пишіть в особисті", "в приватні повідомлення", "деталі в особистих", "звертайтесь в особисті",
+        "звертайтеся в особисті", "у приват", "в приват", "переходь за посиланням",
+        "тисни на посилання", "телеграм канал", "приєднуйся", "бонус",
+        "промокод", "розіграш", "ставки", "виїзд",
+        "виїзд за кордон", "білий квиток", "відстрочка", "сзч",
+        "обмін валют", "кількість місць обмежена", "дізнатися деталі", "биткоин",
+        "инвестиции", "инвестировать", "трейдинг", "трейдер",
+        "сигналы", "заработок", "заработать", "доход",
+        "дохода", "потенциал дохода", "зарплата от", "хорошая зарплата",
+        "без вложений", "вложения от", "ежедневные выплаты", "выплаты каждый день",
+        "первые выплаты", "нужны люди", "набираем людей", "ищем людей",
+        "требуются сотрудники", "требуются люди", "нужен персонал", "удаленная работа",
+        "работа на дому", "удаленный формат", "дистанционн*", "русскоязычн*",
+        "свободный график", "гибкий график", "совмещение с основной", "пиши в лс",
+        "пишите в лс", "в лс", "пиши в личку", "пишите в личку",
+        "в личные сообщения", "подробности в лс", "переходи по ссылке", "жми на ссылку",
+        "приватный канал", "розыгрыш", "выезд", "выезд за границу",
+        "белый билет", "отсрочка", "продам евро", "куплю евро",
+        "обмен валют", "за нал", "количество мест ограничено", "узнать детали",
+        "сигареты", "сигарети", "цигарки", "без досвіду",
+        "без опыта", "жодних дзвінків", "без дзвінків", "без звонков",
+        "робота за ноутбуком", "работа за ноутбуком", "робота у ноутбуці", "щотижневі виплати",
+        "еженедельные выплаты", "виплати в перший тиждень", "ставка від", "ставка от",
+        "кадровий менеджер", "кадрового менеджера", "кадрові менеджери", "кадровый менеджер",
+        "кадровые менеджеры", "безкоштовне житло", "безкоштовне проживання", "бесплатное жилье",
+        "бесплатное проживание", "житло за рахунок", "жилье за счет", "гнучкий графік",
+        "звертайся в особисті", "стукай в оп", "в оп", "наличные средства",
+        "готівкові кошти", "при личной встрече", "личное присутствие", "особиста зустріч",
+        "можу поділитися контактом", "могу поделиться контактом", "пробне заняття", "пробний урок",
+        "набір дітей", "пробное занятие", "пробный урок", "набор детей",
+        # --- Nov 2026 batch ---
+        "мікроавтобус*", "рейси", "виїзди кожного дня", "регулярні виїзди",
+        "україна європа", "переїзди по європі", "легкові авто", "за деталями пишіть",
+        "за деталями звертайтесь", "писати та дзвонити", "пасажирські перевезення", "вантажні перевезення",
+        "без передоплат*", "без предоплат*", "їдемо з україни", "їдемо з данії",
+        "маємо вільні місця", "кому нужна работа", "кому потрібна робота", "очень хороший вариант",
+        "дуже гарний варіант", "підробіт*", "подработк*", "потрібно тестувальника",
+        "хвилин на день", "минут в день", "рекламу на фейсбук", "детальніше в особисті",
+        "з приводу деталей", "требуется водитель", "требуются водители", "потрібен водій",
+        "потрібні водії", "катв", "нелегальн*", "оказываю услуги",
+        "надаю послуги", "сотни отзывов", "сотні відгуків", "контактов выехавших",
+        "реферальн*", "додаткового заробітку", "додатковий заробіток", "дополнительного заработка",
+        "дополнительный заработок", "рекрутер*", "за ноутбуком", "окреме житло",
+        "заповнення анкет", "шукаємо працівників", "пишіть особисто", "для розміщення",
+        "наличные евро", "готівкові євро", "за наличные", "к курсу",
     ],
     'toxic': [
-        "хуй*", "хуе*", "хуи*", "нахуй", "похуй", "пизд*", "бляд*", "блят*",
-        "еба*", "ебан*", "ебл*", "заеб*", "уеб*", "долбоеб*",
+        "хуй*", "хуе*", "хуи*", "нахуй",
+        "похуй", "пизд*", "бляд*", "блят*",
+        "ебат*", "ебал*", "ебаш*", "ебан*",
+        "ебл*", "заеб*", "уеб*", "долбоеб*",
         "мудак*", "мудач*", "гандон*", "гондон*",
         "пидор*", "пидар*", "підар*", "підор*",
-        "дебил*", "дебіл*", "сука", "сучара", "сучка", "сучонок", "курв*", "шлюх*", "чмо",
-        "тупой", "тупая", "тупые", "дурак", "дурач*", "попуск*",
-        "идиот*", "ідіот*", "кретин*", "придурок", "придурк*", "долбан*",
+        "дебил*", "дебіл*", "сука", "сучара",
+        "сучка", "сучонок", "курв*", "шлюх*",
+        "чмо", "тупой", "тупая", "тупые",
+        "дурак", "дурач*", "попуск*", "идиот*",
+        "ідіот*", "кретин*", "придурок", "придурк*",
+        "долбан*", "бля", "відсмокч*",
     ],
 }
+
+# Defaults retired in code — removed from existing databases at startup
+# (unless an admin has pinned them with a command).
+OBSOLETE_DEFAULTS = ["суч*", "оплата на картку", "оплата на карту", "продам євро", "куплю євро"]
 
 DEFAULT_ALLOWED_CHANNELS = ["ua_diaspora_dk"]
 
@@ -544,7 +642,7 @@ def _add_kw_command(message, tier, label):
         return
     keyword = command_arg(message)
     if keyword:
-        add_spam_keyword(keyword, tier=tier)
+        add_spam_keyword(keyword, tier=tier, by_admin=True)
         temp_reply(message, f"✅ Added <b>{html.escape(keyword)}</b> as {label}.")
         log_event(f"➕ {label} keyword added by {user_label(message.from_user)}: "
                   f"<code>{html.escape(keyword)}</code>")
@@ -573,7 +671,7 @@ def handle_del_spam(message):
         return
     keyword = command_arg(message)
     if keyword:
-        remove_spam_keyword(keyword)
+        remove_spam_keyword(keyword, by_admin=True)
         temp_reply(message, f"❌ Removed <b>{html.escape(keyword)}</b>.")
         log_event(f"➖ Keyword removed by {user_label(message.from_user)}: "
                   f"<code>{html.escape(keyword)}</code>")
@@ -671,8 +769,13 @@ def handle_pardon(message):
         reset_strikes(target.id)
         temp_reply(message, f"🕊 Strikes cleared for {html.escape(target.first_name or '')}.")
         log_event(f"🕊 Pardoned: {user_label(target)} (by {user_label(message.from_user)})")
+    elif command_arg(message).isdigit():
+        uid = int(command_arg(message))
+        reset_strikes(uid)
+        temp_reply(message, f"🕊 Strikes cleared for id {uid}.")
+        log_event(f"🕊 Pardoned id <code>{uid}</code> (by {user_label(message.from_user)})")
     else:
-        temp_reply(message, "Reply to the user's message with <code>/pardon</code>.")
+        temp_reply(message, "Reply to the user's message with <code>/pardon</code>, or use <code>/pardon user_id</code>.")
 
 @bot.channel_post_handler(commands=['getid'])
 def handle_get_id(message):
@@ -711,6 +814,11 @@ def process_new_member(chat_id, user):
     if check_cas_banned(user.id):
         hard_ban(chat_id, user.id)
         log_event(f"🚨 Pre-emptively banned {user_label(user)} on join (CAS blacklist).")
+        return
+
+    if BAN_CJK_NAMES and has_cjk_name(user):
+        hard_ban(chat_id, user.id)
+        log_event(f"🈲 Banned {user_label(user)} on join — CJK display name.")
         return
 
     try:
@@ -858,14 +966,45 @@ def handle_toxicity(message, toxic_words):
                   f"(matched: {html.escape(', '.join(sorted(toxic_words)))})\n"
                   f"Message: {html.escape((message.text or message.caption or '')[:400])}")
 
+def handle_channel_identity(message, sc):
+    """A message posted AS a channel (not as a person). Community channels are
+    welcome here, so only the content is judged: spam from a channel deletes the
+    post and bans that channel from posting as itself."""
+    chat_id = message.chat.id
+    allowed = get_allowed_channels()
+    uname = (getattr(sc, 'username', '') or '').lower()
+    if uname in allowed or str(sc.id) in allowed:
+        return
+    text = message.text or message.caption or ""
+    verdict = classify_text(text) if text else None
+    if verdict and verdict['action'] in ('ban', 'strike'):
+        delete_silently(chat_id, message.message_id)
+        try:
+            bot.ban_chat_sender_chat(chat_id, sc.id)
+        except Exception as e:
+            print(f"ban_chat_sender_chat error: {e}")
+        label = f"@{html.escape(uname)}" if uname else str(sc.id)
+        log_event(f"📢 <b>CHANNEL POST DELETED</b> — channel {label} blocked from posting\n"
+                  f"Reason: {verdict['reason']}\nMessage: {html.escape(text[:800])}")
+
 def moderate(message):
     chat_id = message.chat.id
+
+    # 0. Posts sent AS a channel or as the group itself
+    sc = getattr(message, 'sender_chat', None)
+    if sc is not None:
+        if sc.id == chat_id or getattr(message, 'is_automatic_forward', False):
+            return   # anonymous admin, or the linked channel's own auto-post
+        handle_channel_identity(message, sc)
+        return
+
     user = message.from_user
     if user is None or is_admin(chat_id, user.id):
         return
 
     text = message.text or message.caption or ""
     raw = text.lower()
+    trusted = is_trusted(user.id)
 
     # 1. CAS trap for existing members
     if check_cas_banned(user.id):
@@ -874,57 +1013,50 @@ def moderate(message):
         log_event(f"🚨 Banned existing member {user_label(user)} (CAS blacklist).")
         return
 
-    # 2. Known recruiting-campaign handles (*tophr) = instant ban
-    if text and CAMPAIGN_RX.search(raw):
-        punish(message, "campaign handle (*tophr)", ban=True)
+    # 1b. Chinese/Japanese/Korean display names (bot farms posting "1")
+    if BAN_CJK_NAMES and not trusted and has_cjk_name(user):
+        punish(message, "CJK display name", ban=True)
         return
 
-    # 2a. CJK spam (Chinese bot ads) from non-established members
-    if text and CJK_RX.search(text) and not is_trusted(user.id):
+    verdict = classify_text(text) if text else None
+
+    # 2. Instant-ban verdicts (campaign handles, tobacco/account sales, ban keywords, score 5+)
+    if verdict and verdict['action'] == 'ban':
+        punish(message, verdict['reason'], ban=True)
+        return
+
+    # 3. CJK text from non-established members
+    if text and CJK_RX.search(text) and not trusted:
         punish(message, "CJK spam")
         return
 
-    # 2b. Selling tobacco = instant ban
-    if text and SELL_RX.search(raw) and TOBACCO_RX.search(raw):
-        punish(message, "tobacco sale", ban=True)
+    # 4. Spam verdict (score 2-4): delete + strike
+    if verdict and verdict['action'] == 'strike':
+        punish(message, verdict['reason'])
         return
 
-    hits = match_keywords(text) if text else {'ban': set(), 'strong': set(),
-                                              'weak': set(), 'toxic': set()}
-
-    # 3. Instant-ban tier keywords
-    if hits['ban']:
-        punish(message, "ban keyword: " + ", ".join(sorted(hits['ban'])), ban=True)
-        return
-
-    # 4. Forwards from non-whitelisted channels
+    # 5. Forwards from non-whitelisted channels: deleted, no strike (spam was handled above)
     ch = forwarded_channel(message)
     if ch is not None:
         uname = (getattr(ch, 'username', '') or '').lower()
         if uname not in get_allowed_channels() and str(ch.id) not in get_allowed_channels():
-            fwd_score, fwd_reason = score_message(text, hits) if text else (0, "")
             src_label = f"@{html.escape(uname)}" if uname else str(ch.id)
-            if fwd_score >= SPAM_SCORE_THRESHOLD:
-                punish(message, f"forward from channel {src_label}, score {fwd_score} ({fwd_reason})")
-            else:
-                delete_silently(chat_id, message.message_id)
-                log_event(f"📤 Forward deleted (no strike) from {user_label(user)} "
-                          f"— source channel {src_label}\nMessage: {html.escape(text[:400])}")
+            delete_silently(chat_id, message.message_id)
+            log_event(f"📤 Forward deleted (no strike) from {user_label(user)} "
+                      f"— source channel {src_label}\nMessage: {html.escape(text[:400])}")
             return
 
     if not text:
         return
 
-    trusted = is_trusted(user.id)
-
-    # 5. Probation: fresh members can't drop telegram links / @handles
+    # 6. Probation: fresh members can't drop telegram links / @handles
     if not trusted and CONTACT_RX.search(raw) and in_probation(user.id):
         delete_silently(chat_id, message.message_id)
         log_event(f"🧪 <b>PROBATION</b> — deleted telegram link/@handle from newcomer (no strike)\n"
                   f"User: {user_label(user)}\nMessage: {html.escape(text[:400])}")
         return
 
-    # 6. Duplicate flood — trusted members exempt; strike only from the 3rd copy
+    # 7. Duplicate flood — trusted members exempt; strike only from the 3rd copy
     if not trusted:
         dup = duplicate_count(normalize_text(text))
         if dup == 2:
@@ -936,18 +1068,9 @@ def moderate(message):
             punish(message, f"duplicate flood (copy #{dup})")
             return
 
-    # 7. Toxicity: visible warning, 3rd -> 7-day mute
-    if hits['toxic']:
-        handle_toxicity(message, hits['toxic'])
-        return
-
-    # 8. Tiered keyword scoring; 5+ = instant ban, 2+ = delete + strike
-    score, reason = score_message(text, hits)
-    if score >= BAN_SCORE_THRESHOLD:
-        punish(message, f"score {score} ({reason})", ban=True)
-        return
-    if score >= SPAM_SCORE_THRESHOLD:
-        punish(message, f"score {score} ({reason})")
+    # 8. Toxicity: visible warning, 3rd -> 7-day mute
+    if verdict and verdict['action'] == 'toxic':
+        handle_toxicity(message, verdict['hits']['toxic'])
         return
 
     # 9. Clean message — grow the user's trust counter
@@ -973,7 +1096,7 @@ def filter_edited_spam(message):
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=run_web, daemon=True).start()
-    print(f"V8 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, "
+    print(f"V9 anti-spam bot starting — {len(get_spam_keywords())} keywords loaded, "
           f"tiers ban/strong/weak/toxic, trust system ON.")
     bot.infinity_polling(allowed_updates=[
         'message', 'edited_message', 'channel_post', 'callback_query', 'chat_member'
